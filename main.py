@@ -2425,7 +2425,7 @@ class InvoiceApp(QMainWindow):
             "A8": self.seller_website_phone.text(),
             "A9": self.seller_email_phone.text(),
             "A10": "BUYER DETAILS",
-            "E10": "QUOTATION DETAILS" if document_kind == "QUOTATION" else "INVOICE DETAILS",
+            "E10": f"{self.document_kind.currentText().upper()} DETAILS",
             "A11": self.customer_name.text(),
             "A12": "\n".join(
                 line for line in (
@@ -2433,7 +2433,7 @@ class InvoiceApp(QMainWindow):
                     self.customer_address_2.text().strip(),
                 ) if line
             ),
-            "E12": "QUOTATION NO" if document_kind == "QUOTATION" else "INVOICE NO",
+            "E12": f"{self.document_kind.currentText().upper()} NO",
             "G12": f"QTN-{invoice_no:04d}" if document_kind == "QUOTATION" else invoice_no,
             "E13": "DATE",
             "G13": invoice_date.strftime("%d/%m/%Y"),

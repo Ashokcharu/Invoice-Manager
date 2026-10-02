@@ -34,8 +34,8 @@ jobs:
             --onedir `
             --name AdoodsInvoice `
             --icon app.ico `
-            --add-data "invoices/C GST.xlsx;invoices" `
-            --add-data "invoices/I GST.xlsx;invoices" `
+            --add-data "data/C GST.xlsx;data" `
+            --add-data "data/I GST.xlsx;data" `
             main.py
 
       - name: Upload Windows application
