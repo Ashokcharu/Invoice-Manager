@@ -2360,7 +2360,7 @@ class InvoiceApp(QMainWindow):
         document_kind
     ):
 
-        workbook = load_workbook(INVOICE_DIR / "C GST.xlsx")
+        workbook = load_workbook(DATA_DIR / "C GST.xlsx")
         sheet = workbook.active
         authorised_signatory = sheet["F50"].value or "Authorised Signatory"
         for row in sheet.iter_rows():
