@@ -41,5 +41,5 @@ jobs:
       - name: Upload Windows application
         uses: actions/upload-artifact@v4
         with:
-          name: AdoodsInvoice-Windows
+          name: ADInvoice-Windows
           path: dist/AdoodsInvoice/
