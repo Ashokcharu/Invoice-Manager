@@ -9,3 +9,4 @@ dist/
 .idea/
 .vscode/
 invoices/
+data/invoice_signature.png
