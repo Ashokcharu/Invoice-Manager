@@ -5,14 +5,17 @@ import sqlite3
 import subprocess
 import textwrap
 import re
+import json
 import tempfile
 import webbrowser
+from copy import copy
 from urllib.parse import quote
 
 from pathlib import Path
 from decimal import Decimal, ROUND_HALF_UP
 
-from PySide6.QtCore import QDate, Qt, QStandardPaths
+from PySide6.QtCore import QDate, Qt, QStandardPaths, QUrl
+from PySide6.QtCore import QMimeData
 from PySide6.QtGui import QFont, QAction, QImage, QImageReader, QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication,
@@ -141,11 +144,11 @@ def invoice_filename(invoice_no, buyer_name, extension, document_kind="INVOICE")
 
 
 def document_kind_for_selection(index):
-    return "QUOTATION" if index == 0 else "INVOICE"
+    return "INVOICE" if index == 0 else "QUOTATION"
 
 
 def document_kind_selection_for_kind(document_kind):
-    return 0 if document_kind == "QUOTATION" else 1
+    return 1 if document_kind == "QUOTATION" else 0
 
 
 def document_folder_for_selection(index):
@@ -153,6 +156,12 @@ def document_folder_for_selection(index):
 
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event):
         event.ignore()
@@ -169,6 +178,7 @@ class InvoiceApp(QMainWindow):
 
         self.pending_private_move_paths = []
         self.private_move_cancelled = False
+        self.active_document_kind = None
         self.setWindowTitle("Invoice Manager")
         self.resize(1280, 820)
         self.setMinimumSize(1050, 700)
@@ -181,7 +191,11 @@ class InvoiceApp(QMainWindow):
 
         self.create_ui()
 
-        self.new_invoice()
+        document_kind = document_kind_for_selection(
+            self.document_kind.currentIndex()
+        )
+        if not self.restore_document_draft(document_kind):
+            self.new_invoice()
 
 
     # ========================================================
@@ -425,6 +439,53 @@ class InvoiceApp(QMainWindow):
                 con.execute(
                     "ALTER TABLE invoices ADD COLUMN payment_address TEXT NOT NULL DEFAULT ''"
                 )
+            single_number_unique_index = False
+            for index in con.execute("PRAGMA index_list(invoices)"):
+                if index[2]:
+                    indexed_columns = [
+                        column[2]
+                        for column in con.execute(
+                            f"PRAGMA index_info('{index[1]}')"
+                        )
+                    ]
+                    if indexed_columns == ["invoice_no"]:
+                        single_number_unique_index = True
+                        break
+            if single_number_unique_index:
+                con.execute(
+                    """
+                    CREATE TABLE invoices_migrated (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        invoice_no INTEGER NOT NULL,
+                        invoice_date TEXT NOT NULL,
+                        invoice_type TEXT NOT NULL,
+                        customer_name TEXT,
+                        grand_total REAL,
+                        xlsx_path TEXT,
+                        pdf_path TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        document_kind TEXT NOT NULL DEFAULT 'INVOICE',
+                        qr_scanner_path TEXT,
+                        payment_address TEXT NOT NULL DEFAULT '',
+                        UNIQUE(document_kind, invoice_no)
+                    )
+                    """
+                )
+                con.execute(
+                    """
+                    INSERT INTO invoices_migrated (
+                        id, invoice_no, invoice_date, invoice_type, customer_name,
+                        grand_total, xlsx_path, pdf_path, created_at, document_kind,
+                        qr_scanner_path, payment_address
+                    )
+                    SELECT id, invoice_no, invoice_date, invoice_type, customer_name,
+                           grand_total, xlsx_path, pdf_path, created_at, document_kind,
+                           qr_scanner_path, payment_address
+                    FROM invoices
+                    """
+                )
+                con.execute("DROP TABLE invoices")
+                con.execute("ALTER TABLE invoices_migrated RENAME TO invoices")
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bank_profiles (
@@ -467,47 +528,77 @@ class InvoiceApp(QMainWindow):
                 )
                 """
             )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS buyer_profiles (
+                    name TEXT PRIMARY KEY,
+                    address_1 TEXT NOT NULL DEFAULT '',
+                    address_2 TEXT NOT NULL DEFAULT '',
+                    mobile TEXT NOT NULL DEFAULT '',
+                    gstin TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS document_drafts (
+                    document_kind TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL
+                )
+                """
+            )
 
 
     def prune_missing_invoice_records(self):
 
         with sqlite3.connect(DB_PATH) as con:
             records = con.execute(
-                "SELECT invoice_no, xlsx_path, pdf_path FROM invoices"
+                "SELECT id, xlsx_path, pdf_path FROM invoices"
             ).fetchall()
             missing_invoice_numbers = [
-                invoice_no
-                for invoice_no, xlsx_path, pdf_path in records
+                record_id
+                for record_id, xlsx_path, pdf_path in records
                 if not any(
                     path and Path(path).is_file()
                     for path in (xlsx_path, pdf_path)
                 )
             ]
             con.executemany(
-                "DELETE FROM invoices WHERE invoice_no = ?",
-                ((invoice_no,) for invoice_no in missing_invoice_numbers),
+                "DELETE FROM invoices WHERE id = ?",
+                ((record_id,) for record_id in missing_invoice_numbers),
             )
 
 
-    def next_invoice_number(self):
+    def next_invoice_number(self, document_kind=None):
 
         self.prune_missing_invoice_records()
+        if document_kind is None:
+            document_kind = document_kind_for_selection(
+                self.document_kind.currentIndex()
+            )
 
         with sqlite3.connect(DB_PATH) as con:
 
             row = con.execute(
-                "SELECT MAX(invoice_no) FROM invoices"
+                "SELECT MAX(invoice_no) FROM invoices WHERE document_kind = ?",
+                (document_kind,),
             ).fetchone()
 
         return max(START_INVOICE_NUMBER, (row[0] or 0) + 1)
 
 
-    def saved_invoice_file(self, invoice_no):
+    def saved_invoice_file(self, invoice_no, document_kind=None):
+
+        if document_kind is None:
+            document_kind = document_kind_for_selection(
+                self.document_kind.currentIndex()
+            )
 
         with sqlite3.connect(DB_PATH) as con:
             row = con.execute(
-                "SELECT xlsx_path, customer_name FROM invoices WHERE invoice_no = ?",
-                (invoice_no,),
+                """SELECT xlsx_path, customer_name FROM invoices
+                   WHERE invoice_no = ? AND document_kind = ?""",
+                (invoice_no, document_kind),
             ).fetchone()
 
         if not row or not row[0]:
@@ -574,6 +665,120 @@ class InvoiceApp(QMainWindow):
                 """,
                 tuple(field.text().strip() for field in self.seller_profile_fields()),
             )
+
+
+    def refresh_buyer_profiles(self, selected_name=""):
+
+        with sqlite3.connect(DB_PATH) as con:
+            profiles = con.execute(
+                "SELECT name FROM buyer_profiles ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+
+        self.buyer_selector.blockSignals(True)
+        self.buyer_selector.clear()
+        self.buyer_selector.addItem("Select saved buyer", "")
+        for (name,) in profiles:
+            self.buyer_selector.addItem(name, name)
+        selected_index = self.buyer_selector.findData(selected_name)
+        self.buyer_selector.setCurrentIndex(max(0, selected_index))
+        self.buyer_selector.blockSignals(False)
+
+
+    def load_buyer_profile(self, index):
+
+        profile_name = self.buyer_selector.itemData(index)
+        if not profile_name:
+            return
+
+        with sqlite3.connect(DB_PATH) as con:
+            profile = con.execute(
+                """
+                SELECT name, address_1, address_2, mobile, gstin
+                FROM buyer_profiles WHERE name = ?
+                """,
+                (profile_name,),
+            ).fetchone()
+        if not profile:
+            return
+
+        for field, value in zip(
+            (
+                self.customer_name,
+                self.customer_address,
+                self.customer_address_2,
+                self.customer_mobile,
+                self.customer_gstin,
+            ),
+            profile,
+        ):
+            field.setText(value)
+
+
+    def save_buyer_profile(self):
+
+        name = self.customer_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Buyer Name Required", "Enter a buyer name first.")
+            return
+
+        with sqlite3.connect(DB_PATH) as con:
+            con.execute(
+                """
+                INSERT INTO buyer_profiles (name, address_1, address_2, mobile, gstin)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    address_1 = excluded.address_1,
+                    address_2 = excluded.address_2,
+                    mobile = excluded.mobile,
+                    gstin = excluded.gstin
+                """,
+                (
+                    name,
+                    self.customer_address.text().strip(),
+                    self.customer_address_2.text().strip(),
+                    self.customer_mobile.text().strip(),
+                    self.customer_gstin.text().strip(),
+                ),
+            )
+        self.refresh_buyer_profiles(name)
+        self.statusBar().showMessage(f"Buyer details saved: {name}")
+
+
+    def delete_buyer_profile(self):
+
+        profile_name = self.buyer_selector.currentData()
+        if not profile_name:
+            QMessageBox.information(
+                self, "Select a Saved Buyer", "Choose a saved buyer to delete."
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Delete Buyer Details",
+            f"Delete the saved buyer '{profile_name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        with sqlite3.connect(DB_PATH) as con:
+            con.execute("DELETE FROM buyer_profiles WHERE name = ?", (profile_name,))
+        self.refresh_buyer_profiles()
+
+
+    def new_buyer_profile(self):
+
+        self.buyer_selector.setCurrentIndex(0)
+        for field in (
+            self.customer_name,
+            self.customer_address,
+            self.customer_address_2,
+            self.customer_mobile,
+            self.customer_gstin,
+        ):
+            field.clear()
 
 
     def refresh_bank_profiles(self, selected_name=None):
@@ -695,7 +900,7 @@ class InvoiceApp(QMainWindow):
             f"pa={quote(self.bank_upi_id.text().strip())}"
             f"&pn={quote(self.seller_name.text())}"
             f"&am={money(amount):.2f}&cu=INR"
-            f"&tn={quote(f'QTN-{invoice_no:04d}')}"
+            f"&tn={quote(str(invoice_no))}"
         )
 
 
@@ -718,7 +923,9 @@ class InvoiceApp(QMainWindow):
                 invoice_no,
                 self.customer_name.text(),
                 "_payment.png",
-                "QUOTATION",
+                document_kind_for_selection(
+                    self.document_kind.currentIndex()
+                ),
             )
         )
 
@@ -736,9 +943,12 @@ class InvoiceApp(QMainWindow):
                 SELECT invoice_date, invoice_type, xlsx_path, grand_total,
                         document_kind, qr_scanner_path, payment_address
                 FROM invoices
-                WHERE invoice_no = ?
+                WHERE invoice_no = ? AND document_kind = ?
                 """,
-                (invoice_no,),
+                (
+                    invoice_no,
+                    document_kind_for_selection(self.document_kind.currentIndex()),
+                ),
             ).fetchone()
 
         if not row:
@@ -773,7 +983,8 @@ class InvoiceApp(QMainWindow):
         self.document_kind.setCurrentIndex(
             document_kind_selection_for_kind(row[4])
         )
-        if row[4] == "QUOTATION":
+        self.buyer_selector.setCurrentIndex(0)
+        if row[4] in ("INVOICE", "QUOTATION"):
             payment_address = (
                 row[6]
                 or cell_text("G49", "UPI ID:")
@@ -797,6 +1008,16 @@ class InvoiceApp(QMainWindow):
             )
         self.invoice_date.setDate(QDate.fromString(row[0], "yyyy-MM-dd"))
         self.invoice_type.setCurrentIndex(0 if row[1] == "IGST" else 1)
+        website_contact = "   ".join(
+            str(value).strip()
+            for value in (sheet["A8"].value, sheet["E8"].value)
+            if value is not None and str(value).strip()
+        )
+        email_contact = "   ".join(
+            str(value).strip()
+            for value in (sheet["A9"].value, sheet["E9"].value)
+            if value is not None and str(value).strip()
+        )
         seller_values = (
             (self.seller_name, sheet["A2"].value),
             (self.seller_business, sheet["A3"].value),
@@ -804,8 +1025,8 @@ class InvoiceApp(QMainWindow):
             (self.seller_address_2, sheet["A5"].value),
             (self.seller_gstin, cell_text("A6", "GSTIN :") or cell_text("A6", "GSTIN:")),
             (self.seller_state, sheet["A7"].value),
-            (self.seller_website_phone, sheet["A8"].value),
-            (self.seller_email_phone, sheet["A9"].value),
+            (self.seller_website_phone, website_contact),
+            (self.seller_email_phone, email_contact),
         )
         for field, value in seller_values:
             if value is not None and str(value).strip():
@@ -837,7 +1058,7 @@ class InvoiceApp(QMainWindow):
                 gstin = gstin or gstin_match.group(1).strip()
         self.customer_mobile.setText(mobile)
         self.customer_gstin.setText(gstin)
-        if row[4] == "QUOTATION":
+        if row[4] in ("INVOICE", "QUOTATION"):
             for field, address, prefix in (
                 (self.bank_name, "D44", "Bank Name:"),
                 (self.bank_account, "D45", "A/C No:"),
@@ -864,7 +1085,7 @@ class InvoiceApp(QMainWindow):
             if value is not None and str(value).strip():
                 field.setText(str(value).strip())
         self.select_bank_profile(self.bank_name.text())
-        if row[4] == "QUOTATION" and row[6]:
+        if row[6]:
             self.bank_upi_id.setText(row[6])
 
         declaration_parts = [
@@ -964,7 +1185,7 @@ class InvoiceApp(QMainWindow):
         self.setCentralWidget(self.invoice_tab)
         return
 
-        self.invoice_type = QComboBox()
+        self.invoice_type = NoWheelComboBox()
 
         self.invoice_type.addItems([
             "IGST",
@@ -1228,7 +1449,7 @@ class InvoiceApp(QMainWindow):
         )
 
         save_button.clicked.connect(
-            self.save_invoice
+            lambda checked=False: self.save_invoice()
         )
 
 
@@ -1440,7 +1661,7 @@ class InvoiceApp(QMainWindow):
         )
 
         save_button.clicked.connect(
-            self.save_invoice
+            lambda checked=False: self.save_invoice()
         )
 
 
@@ -1505,8 +1726,8 @@ class InvoiceApp(QMainWindow):
         self.seller_address_2 = QLineEdit("ULAVARSANDHAI ROAD, HOSUR - 635 109")
         self.seller_gstin = QLineEdit("33DJRPP6135G1ZW")
         self.seller_state = QLineEdit("STATE: TAMIL NADU   CODE: 33")
-        self.seller_website_phone = QLineEdit("Website: adoodshosur@gmail.com   PHONE: 9514109080")
-        self.seller_email_phone = QLineEdit("E.Mail: sales@adoods.com   6382208004")
+        self.seller_website_phone = QLineEdit("Website: adoods.com   PHONE: +91 9514109080")
+        self.seller_email_phone = QLineEdit("Email: adoodshosur@gmail.com   +91 6382208004")
         self.invoice_heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.invoice_heading.setStyleSheet("font: 20pt 'Arial Black';")
         self.seller_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1535,6 +1756,20 @@ class InvoiceApp(QMainWindow):
         self.customer_address_2 = QLineEdit()
         self.customer_mobile = QLineEdit()
         self.customer_gstin = QLineEdit()
+        self.buyer_selector = NoWheelComboBox()
+        self.buyer_selector.currentIndexChanged.connect(self.load_buyer_profile)
+        buyer_profile_row = QHBoxLayout()
+        buyer_profile_row.addWidget(self.buyer_selector, 1)
+        new_buyer_button = QPushButton("New Buyer")
+        new_buyer_button.clicked.connect(self.new_buyer_profile)
+        save_buyer_button = QPushButton("Save / Update")
+        save_buyer_button.clicked.connect(self.save_buyer_profile)
+        delete_buyer_button = QPushButton("Delete")
+        delete_buyer_button.clicked.connect(self.delete_buyer_profile)
+        buyer_profile_row.addWidget(new_buyer_button)
+        buyer_profile_row.addWidget(save_buyer_button)
+        buyer_profile_row.addWidget(delete_buyer_button)
+        buyer_form.addRow("Saved buyer details", buyer_profile_row)
         buyer_form.addRow("Name", self.customer_name)
         buyer_form.addRow("Address line 1", self.customer_address)
         buyer_form.addRow("Address line 2", self.customer_address_2)
@@ -1545,7 +1780,7 @@ class InvoiceApp(QMainWindow):
         self.document_details_box = invoice_box
         invoice_form = QFormLayout(invoice_box)
         self.invoice_no = QLineEdit()
-        self.document_kind = QComboBox()
+        self.document_kind = NoWheelComboBox()
         self.document_kind.addItems(["Invoice", "Quotation"])
         self.document_number_label = QLabel("Invoice No")
         self.invoice_date = QDateEdit(QDate.currentDate())
@@ -1553,7 +1788,7 @@ class InvoiceApp(QMainWindow):
         self.invoice_date.setDisplayFormat("dd/MM/yyyy")
         self.invoice_date.setKeyboardTracking(False)
         self.po_number = QLineEdit()
-        self.invoice_type = QComboBox()
+        self.invoice_type = NoWheelComboBox()
         self.invoice_type.addItems(["IGST", "CGST + SGST"])
         self.gst_rate = NoWheelDoubleSpinBox()
         self.gst_rate.setRange(0, 100)
@@ -1577,7 +1812,7 @@ class InvoiceApp(QMainWindow):
         self.payment_percent = NoWheelDoubleSpinBox()
         self.payment_percent.setRange(1, 100)
         self.payment_percent.setDecimals(2)
-        self.payment_percent.setValue(50)
+        self.payment_percent.setValue(100)
         self.payment_percent.setSuffix(" % to collect")
         payment_form.addRow(
             "Amount to collect", self.spinbox_with_arrows(self.payment_percent)
@@ -1655,6 +1890,7 @@ class InvoiceApp(QMainWindow):
         page_layout.addLayout(totals_grid)
 
         bank_box = QGroupBox("Bank Profiles")
+        self.bank_box = bank_box
         bank_grid = QGridLayout(bank_box)
         self.bank_name = QLineEdit("K V B")
         self.bank_account = QLineEdit("1607135000011387")
@@ -1662,7 +1898,7 @@ class InvoiceApp(QMainWindow):
         self.bank_upi_id = QLineEdit()
         self.bank_upi_id.setPlaceholderText("Required for PhonePe / Google Pay QR")
         self.bank_upi_label = QLabel("UPI ID for amount-specific QR")
-        self.bank_selector = QComboBox()
+        self.bank_selector = NoWheelComboBox()
         self.bank_selector.currentIndexChanged.connect(self.load_bank_profile)
         new_bank_button = QPushButton("New Bank")
         new_bank_button.clicked.connect(self.new_bank_profile)
@@ -1734,8 +1970,8 @@ class InvoiceApp(QMainWindow):
         action_row = QHBoxLayout()
         self.new_document_button = QPushButton("New Invoice")
         self.new_document_button.clicked.connect(self.new_invoice)
-        self.whatsapp_button = QPushButton("WhatsApp Quotation")
-        self.whatsapp_button.clicked.connect(self.share_quotation_whatsapp)
+        self.whatsapp_button = QPushButton("WhatsApp Invoice")
+        self.whatsapp_button.clicked.connect(self.share_document_whatsapp)
         self.whatsapp_button.setVisible(False)
         self.save_document_button = QPushButton("Save Invoice")
         self.save_document_button.setObjectName("primary")
@@ -1758,9 +1994,142 @@ class InvoiceApp(QMainWindow):
         self.invoice_date.dateChanged.connect(self.refresh)
         self.gst_rate.valueChanged.connect(self.refresh)
         self.load_seller_profile()
+        self.refresh_buyer_profiles()
         self.refresh_bank_profiles()
         self.refresh_invoice_history()
         self.document_kind_changed(self.document_kind.currentIndex())
+
+
+    def capture_document_draft(self):
+
+        return {
+            "invoice_no": self.invoice_no.text(),
+            "invoice_date": self.invoice_date.date().toString("yyyy-MM-dd"),
+            "customer_name": self.customer_name.text(),
+            "customer_address": self.customer_address.text(),
+            "customer_address_2": self.customer_address_2.text(),
+            "customer_mobile": self.customer_mobile.text(),
+            "customer_gstin": self.customer_gstin.text(),
+            "buyer_profile": self.buyer_selector.currentData() or "",
+            "po_number": self.po_number.text(),
+            "invoice_type": self.invoice_type.currentIndex(),
+            "gst_rate": self.gst_rate.value(),
+            "items": [
+                {
+                    "description": self.cell(row, 1),
+                    "hsn": self.cell(row, 2),
+                    "quantity": self.cell(row, 3),
+                    "rate": self.cell(row, 4),
+                    "per": self.cell(row, 5),
+                }
+                for row in range(self.items.rowCount())
+                if self.cell(row, 1)
+            ],
+            "hsn_code": self.hsn_code.text(),
+            "bundle_count": self.bundle_count.text(),
+            "through": self.through.text(),
+            "bank_name": self.bank_name.text(),
+            "bank_account": self.bank_account.text(),
+            "bank_ifsc": self.bank_ifsc.text(),
+            "bank_upi_id": self.bank_upi_id.text(),
+            "bank_profile": self.bank_selector.currentData() or "",
+            "payment_percent": self.payment_percent.value(),
+            "declaration": self.declaration.toPlainText(),
+            "seller_signatory": self.seller_signatory.text(),
+            "jurisdiction": self.jurisdiction.text(),
+            "private_invoice": self.private_invoice_checkbox.isChecked(),
+            "custom_output_dir": str(self.custom_output_dir or ""),
+        }
+
+
+    def save_document_draft(self, document_kind):
+
+        state_json = json.dumps(self.capture_document_draft())
+        with sqlite3.connect(DB_PATH) as con:
+            con.execute(
+                """
+                INSERT INTO document_drafts (document_kind, state_json)
+                VALUES (?, ?)
+                ON CONFLICT(document_kind) DO UPDATE SET
+                    state_json = excluded.state_json
+                """,
+                (document_kind, state_json),
+            )
+
+
+    def delete_document_draft(self, document_kind):
+
+        with sqlite3.connect(DB_PATH) as con:
+            con.execute(
+                "DELETE FROM document_drafts WHERE document_kind = ?",
+                (document_kind,),
+            )
+
+
+    def restore_document_draft(self, document_kind):
+
+        with sqlite3.connect(DB_PATH) as con:
+            row = con.execute(
+                "SELECT state_json FROM document_drafts WHERE document_kind = ?",
+                (document_kind,),
+            ).fetchone()
+        if not row:
+            return False
+
+        state = json.loads(row[0])
+        self.invoice_no.setText(state.get("invoice_no", ""))
+        self.invoice_date.setDate(
+            QDate.fromString(state.get("invoice_date", ""), "yyyy-MM-dd")
+        )
+        for key, field in (
+            ("customer_name", self.customer_name),
+            ("customer_address", self.customer_address),
+            ("customer_address_2", self.customer_address_2),
+            ("customer_mobile", self.customer_mobile),
+            ("customer_gstin", self.customer_gstin),
+            ("po_number", self.po_number),
+            ("hsn_code", self.hsn_code),
+            ("bundle_count", self.bundle_count),
+            ("through", self.through),
+            ("bank_name", self.bank_name),
+            ("bank_account", self.bank_account),
+            ("bank_ifsc", self.bank_ifsc),
+            ("bank_upi_id", self.bank_upi_id),
+            ("seller_signatory", self.seller_signatory),
+            ("jurisdiction", self.jurisdiction),
+        ):
+            field.setText(state.get(key, ""))
+        self.buyer_selector.blockSignals(True)
+        self.buyer_selector.setCurrentIndex(
+            max(0, self.buyer_selector.findData(state.get("buyer_profile", "")))
+        )
+        self.buyer_selector.blockSignals(False)
+        self.bank_selector.blockSignals(True)
+        self.bank_selector.setCurrentIndex(
+            max(0, self.bank_selector.findData(state.get("bank_profile", "")))
+        )
+        self.bank_selector.blockSignals(False)
+        self.invoice_type.setCurrentIndex(state.get("invoice_type", 0))
+        self.gst_rate.setValue(state.get("gst_rate", 5))
+        self.payment_percent.setValue(state.get("payment_percent", 100))
+        self.declaration.setPlainText(state.get("declaration", ""))
+        self.private_invoice_checkbox.setChecked(
+            state.get("private_invoice", False)
+        )
+        custom_output_dir = state.get("custom_output_dir", "")
+        self.custom_output_dir = Path(custom_output_dir) if custom_output_dir else None
+
+        self.items.setRowCount(0)
+        for item_data in state.get("items", []):
+            self.add_item_row()
+            row_index = self.items.rowCount() - 1
+            for column, key in (
+                (1, "description"), (2, "hsn"), (3, "quantity"),
+                (4, "rate"), (5, "per"),
+            ):
+                self.items.item(row_index, column).setText(item_data.get(key, ""))
+        self.refresh()
+        return True
 
 
     def refresh_invoice_history(self):
@@ -1784,12 +2153,12 @@ class InvoiceApp(QMainWindow):
         self.invoice_history.clear()
         for invoice_no, invoice_date, customer_name, total, document_kind in invoices:
             buyer = customer_name or "Unnamed buyer"
-            prefix = "QTN" if document_kind == "QUOTATION" else "INV"
             item = QListWidgetItem(
-                f"{prefix}-{invoice_no:04d}   {buyer}   ·   {invoice_date}   ·   "
+                f"{document_kind.title()} {invoice_no}   {buyer}   ·   {invoice_date}   ·   "
                 f"₹{(total or 0):,.2f}"
             )
             item.setData(Qt.ItemDataRole.UserRole, invoice_no)
+            item.setData(Qt.ItemDataRole.UserRole + 1, document_kind)
             self.invoice_history.addItem(item)
         self.invoice_history.blockSignals(False)
 
@@ -1798,6 +2167,10 @@ class InvoiceApp(QMainWindow):
 
         invoice_no = item.data(Qt.ItemDataRole.UserRole)
         if invoice_no is not None:
+            document_kind = item.data(Qt.ItemDataRole.UserRole + 1)
+            self.document_kind.setCurrentIndex(
+                document_kind_selection_for_kind(document_kind)
+            )
             self.invoice_no.setText(str(invoice_no))
             self.load_invoice()
 
@@ -1805,7 +2178,14 @@ class InvoiceApp(QMainWindow):
     def document_kind_changed(self, index):
 
         is_invoice_selection = index == 0
-        is_quotation = document_kind_for_selection(index) == "QUOTATION"
+        document_kind = document_kind_for_selection(index)
+        if self.active_document_kind is None:
+            self.active_document_kind = document_kind
+        elif document_kind != self.active_document_kind:
+            self.save_document_draft(self.active_document_kind)
+            self.active_document_kind = document_kind
+            if not self.restore_document_draft(document_kind):
+                self.new_invoice()
         self.document_number_label.setText(
             "Invoice No" if is_invoice_selection else "Quotation No"
         )
@@ -1825,8 +2205,15 @@ class InvoiceApp(QMainWindow):
         self.private_invoice_checkbox.setVisible(is_invoice_selection)
         if not is_invoice_selection:
             self.private_invoice_checkbox.setChecked(False)
-        self.payment_box.setVisible(is_quotation)
-        self.whatsapp_button.setVisible(is_quotation)
+        self.payment_box.setTitle(
+            "Invoice Payment" if is_invoice_selection else "Quotation Payment"
+        )
+        self.payment_box.setVisible(is_invoice_selection)
+        self.bank_box.setVisible(is_invoice_selection)
+        self.whatsapp_button.setText(
+            "WhatsApp Invoice" if is_invoice_selection else "WhatsApp Quotation"
+        )
+        self.whatsapp_button.setVisible(True)
 
 
     def choose_save_folder(self):
@@ -1843,15 +2230,20 @@ class InvoiceApp(QMainWindow):
             )
 
 
-    def share_quotation_whatsapp(self):
+    def share_document_whatsapp(self):
 
+        document_name = self.document_kind.currentText()
+        document_kind = document_kind_for_selection(
+            self.document_kind.currentIndex()
+        )
+        is_invoice = document_kind == "INVOICE"
         mobile = re.sub(r"\D", "", self.customer_mobile.text())
         if len(mobile) == 10:
             mobile = "91" + mobile
         if not mobile:
             QMessageBox.warning(
                 self, "Buyer Mobile Required",
-                "Enter the buyer's mobile number before sharing the quotation.",
+                "Enter the buyer's mobile number before sharing the document.",
             )
             return
 
@@ -1859,68 +2251,103 @@ class InvoiceApp(QMainWindow):
             invoice_no = int(self.invoice_no.text())
         except ValueError:
             QMessageBox.warning(
-                self, "Quotation Number Required",
-                "Enter a valid quotation number before sharing.",
+                self, f"{document_name} Number Required",
+                f"Enter a valid {document_name.lower()} number before sharing.",
             )
             return
-        if not self.bank_upi_id.text().strip():
+        if is_invoice and not self.bank_upi_id.text().strip():
             QMessageBox.warning(
                 self,
-                "Payment Profile Required",
-            "Choose a bank profile with a UPI ID to create an amount-specific payment QR.",
+                "Payment QR Required",
+                "Select a bank profile with a UPI ID before sharing the invoice scanner.",
             )
             return
         if not self.save_document_bundle(show_dialog=False):
             QMessageBox.warning(
                 self,
-                "Quotation Not Sent",
-                "Save the quotation and PDF before opening WhatsApp.",
+                f"{document_name} Not Sent",
+                f"Save the {document_name.lower()} and PDF before opening WhatsApp.",
             )
             return
         with sqlite3.connect(DB_PATH) as con:
             row = con.execute(
-                "SELECT pdf_path FROM invoices WHERE invoice_no = ?",
-                (invoice_no,),
+                """SELECT pdf_path FROM invoices
+                   WHERE invoice_no = ? AND document_kind = ?""",
+                (
+                    invoice_no,
+                    document_kind_for_selection(self.document_kind.currentIndex()),
+                ),
             ).fetchone()
         pdf_path = row[0] if row else ""
-        _, _, _, total = self.calculate()
-        amount = money(total * Decimal(str(self.payment_percent.value())) / 100)
-        qr_path = self.quotation_payment_qr_path(
-            invoice_no, self.invoice_date.date().toPython()
-        )
-        qr_image = QImage(str(qr_path))
-        if qr_image.isNull():
+        if not pdf_path or not Path(pdf_path).is_file():
             QMessageBox.warning(
                 self,
-                "Payment QR Missing",
-                f"The generated payment QR could not be loaded:\n{qr_path}",
+                "PDF Missing",
+                "Save the document PDF before attaching it in WhatsApp.",
             )
             return
-        QApplication.clipboard().setImage(qr_image)
-        message = (
-            f"Hello {self.customer_name.text().strip() or 'Customer'},\n"
-            f"{self.seller_name.text()}\n\n"
-            f"Quotation total: INR {total:.2f}\n"
-            f"Advance ({self.payment_percent.value():g}%): INR {amount:.2f}\n\n"
-            "Scan the QR to pay; it will prefill the advance amount."
+        attachment_paths = [Path(pdf_path).resolve()]
+        if is_invoice:
+            qr_path = self.quotation_payment_qr_path(
+                invoice_no, self.invoice_date.date().toPython()
+            )
+            if not qr_path.is_file():
+                QMessageBox.warning(
+                    self,
+                    "Payment QR Missing",
+                    f"The invoice scanner could not be found:\n{qr_path}",
+                )
+                return
+            attachment_paths.append(qr_path.resolve())
+
+        pdf_mime_data = QMimeData()
+        pdf_mime_data.setUrls(
+            [QUrl.fromLocalFile(str(path)) for path in attachment_paths]
         )
+        QApplication.clipboard().setMimeData(pdf_mime_data)
+        greeting = self.customer_name.text().strip() or "Customer"
+        if not is_invoice:
+            message = (
+                f"Hello {greeting},\n\n"
+                "Please find attached our quotation for your review. "
+                "We would appreciate your feedback and look forward to the opportunity to work with you. \n\n"
+                "Please feel free to reach out if you have any questions or require any changes.\n\n"
+                f"Regards,\n{self.seller_name.text()}"
+            )
+        else:
+            _, _, _, total = self.calculate()
+            payment_percent = self.payment_percent.value()
+            amount = money(total * Decimal(str(payment_percent)) / 100)
+            message_lines = [
+                f"Hello {greeting},",
+                self.seller_name.text(),
+                "",
+            ]
+            if payment_percent >= 100:
+                message_lines.append(f"Total Amount (100%): INR {total:.2f}")
+            else:
+                remaining = money(total - amount)
+                message_lines.extend((
+                    f"Total Amount: INR {total:.2f}",
+                    f"Advance ({payment_percent:g}%): INR {amount:.2f}",
+                    f"Remaining: INR {remaining:.2f}",
+                ))
+            message = "\n".join(message_lines)
         opened = webbrowser.open(
             f"https://wa.me/{mobile}?text={quote(message)}"
         )
+        attachment_names = " and ".join(path.name for path in attachment_paths)
         if opened:
             QMessageBox.information(
                 self,
-                "Attach Payment QR",
-                "The QR image is copied. In WhatsApp, paste it into the message (Ctrl+V) and attach the quotation PDF.\n\n"
-                f"QR image: {qr_path}\n"
-                f"Quotation PDF: {pdf_path}",
+                "Attach Files",
+                f"The following file(s) are copied. Paste them into the WhatsApp chat (Ctrl+V):\n\n{attachment_names}",
             )
         else:
             QMessageBox.warning(
                 self,
                 "WhatsApp Could Not Be Opened",
-                "The QR image is copied. Open WhatsApp, paste it into the message (Ctrl+V), and attach the quotation PDF:\n"
-                f"QR image: {qr_path}\nQuotation PDF: {pdf_path}",
+                f"The following file(s) are copied. Open WhatsApp and paste them into the chat (Ctrl+V):\n{attachment_names}",
             )
 
 
@@ -2012,6 +2439,10 @@ class InvoiceApp(QMainWindow):
 
     def new_invoice(self):
 
+        document_kind = document_kind_for_selection(
+            self.document_kind.currentIndex()
+        )
+        self.delete_document_draft(document_kind)
         self.loaded_invoice_no = None
         self.custom_output_dir = None
         self.private_invoice_checkbox.setChecked(False)
@@ -2029,6 +2460,7 @@ class InvoiceApp(QMainWindow):
 
 
         self.customer_name.clear()
+        self.buyer_selector.setCurrentIndex(0)
 
         self.customer_gstin.clear()
 
@@ -2049,6 +2481,7 @@ class InvoiceApp(QMainWindow):
         self.items.setRowCount(0)
         self.invoice_type.setCurrentIndex(0)
         self.gst_rate.setValue(5)
+        self.payment_percent.setValue(100)
 
 
         self.refresh()
@@ -2377,6 +2810,56 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
         existing_merges = {str(cell_range) for cell_range in sheet.merged_cells.ranges}
+        for merge_range in ("A8:H8", "A9:H9"):
+            if merge_range in existing_merges:
+                sheet.unmerge_cells(merge_range)
+                existing_merges.remove(merge_range)
+        for address in ("A8", "A9"):
+            current_border = sheet[address].border
+            sheet[address].border = Border(
+                left=current_border.left,
+                right=Side(),
+                top=current_border.top,
+                bottom=current_border.bottom,
+            )
+        for merge_range in ("A8:D8", "E8:H8", "A9:D9", "E9:H9"):
+            sheet.merge_cells(merge_range)
+            existing_merges.add(merge_range)
+        contact_edge = Side(style="medium")
+        for row in (8, 9):
+            cell = sheet.cell(row, 8)
+            current_border = cell.border
+            cell.border = Border(
+                left=current_border.left,
+                right=contact_edge,
+                top=current_border.top,
+                bottom=current_border.bottom,
+            )
+        for column in range(1, 9):
+            cell = sheet.cell(9, column)
+            current_border = cell.border
+            cell.border = Border(
+                left=current_border.left,
+                right=current_border.right,
+                top=current_border.top,
+                bottom=contact_edge,
+            )
+        if document_kind == "INVOICE":
+            for merge_range in (
+                "D43:H43", "D44:E44", "F44:H44", "D45:E45", "F45:H45",
+                "D46:E46", "F46:H46", "F47:H47", "F48:H49", "F50:H50",
+            ):
+                if merge_range in existing_merges:
+                    sheet.unmerge_cells(merge_range)
+                    existing_merges.remove(merge_range)
+            for merge_range in (
+                "A43:C43", "A44:C44", "A45:C45", "D43:F43",
+                "D44:F44", "D45:F45", "D46:F46", "G43:H43",
+                "G44:G46", "A47:C47", "A48:E49", "F47:H47",
+                "F48:H49", "F50:H50", "A51:H51",
+            ):
+                sheet.merge_cells(merge_range)
+                existing_merges.add(merge_range)
         if document_kind == "QUOTATION":
             for merge_range in (
                 "A44:C44", "A45:C45", "D44:E44", "F44:H44",
@@ -2414,6 +2897,23 @@ class InvoiceApp(QMainWindow):
         amount_label_row, amount_words_row = 34, 35
         tax_words_row = 41
 
+        website_parts = re.split(
+            r"\s+PHONE\s*[:\-]*\s*",
+            self.seller_website_phone.text(),
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )
+        website_text = website_parts[0].strip()
+        website_phone = website_parts[1].strip() if len(website_parts) > 1 else ""
+        email_text = self.seller_email_phone.text().strip()
+        email_match = re.search(
+            r"\s+((?:\+\s*)?\d[\d\s().-]*\d)\s*$",
+            email_text,
+        )
+        email_phone = email_match.group(1).strip() if email_match else ""
+        if email_match:
+            email_text = email_text[:email_match.start()].strip()
+
         values = {
             "A1": self.invoice_heading.text(),
             "A2": self.seller_name.text(),
@@ -2422,8 +2922,10 @@ class InvoiceApp(QMainWindow):
             "A5": self.seller_address_2.text(),
             "A6": f"GSTIN :{self.seller_gstin.text()}",
             "A7": self.seller_state.text(),
-            "A8": self.seller_website_phone.text(),
-            "A9": self.seller_email_phone.text(),
+            "A8": website_text,
+            "E8": f"PHONE: {website_phone}" if website_phone else "",
+            "A9": email_text,
+            "E9": email_phone,
             "A10": "BUYER DETAILS",
             "E10": f"{self.document_kind.currentText().upper()} DETAILS",
             "A11": self.customer_name.text(),
@@ -2434,7 +2936,7 @@ class InvoiceApp(QMainWindow):
                 ) if line
             ),
             "E12": f"{self.document_kind.currentText().upper()} NO",
-            "G12": f"QTN-{invoice_no:04d}" if document_kind == "QUOTATION" else invoice_no,
+            "G12": invoice_no,
             "E13": "DATE",
             "G13": invoice_date.strftime("%d/%m/%Y"),
             "E14": "P.O NO",
@@ -2462,7 +2964,7 @@ class InvoiceApp(QMainWindow):
             "A48": self.declaration.toPlainText().strip(),
             "F50": authorised_signatory,
         }
-        if document_kind == "QUOTATION":
+        if document_kind == "INVOICE":
             for address in (
                 "F44", "F45", "D44", "D45", "F46", "D46", "F47", "F50",
                 "A47", "A48", "A44", "A45",
@@ -2477,10 +2979,31 @@ class InvoiceApp(QMainWindow):
                 "D45": f"A/C No: {self.bank_account.text()}",
                 "D46": f"IFSC: {self.bank_ifsc.text()}",
                 "G43": "UPI PAYMENT",
-                "H44": f"Advance {self.payment_percent.value():g}%: INR "
-                       f"{money(total * Decimal(str(self.payment_percent.value())) / 100):.2f}",
-                "H45": "Scan QR to prefill amount",
+                "H44": (
+                    f"Advance {self.payment_percent.value():g}%: INR "
+                    f"{money(total * Decimal(str(self.payment_percent.value())) / 100):.2f}"
+                    if self.payment_percent.value() < 100
+                    else f"Total Amount (100%): INR {total:.2f}"
+                ),
+                "H45": (
+                    "Scan QR to prefill amount"
+                    if self.bank_upi_id.text().strip() else ""
+                ),
                 "H46": "WhatsApp: +91 6382208004",
+                "A47": "Declaration",
+                "A48": self.declaration.toPlainText().strip(),
+                "F47": self.seller_signatory.text(),
+                "F50": "Authorised Signatory",
+            })
+        else:
+            for address in (
+                "A43", "A44", "A45", "D43", "D44", "F44", "D45",
+                "F45", "D46", "F46", "G43", "H44", "H45", "H46",
+            ):
+                values.pop(address, None)
+            for row in range(43, 47):
+                sheet.row_dimensions[row].hidden = True
+            values.update({
                 "A47": "Declaration",
                 "A48": self.declaration.toPlainText().strip(),
                 "F47": self.seller_signatory.text(),
@@ -2488,7 +3011,7 @@ class InvoiceApp(QMainWindow):
             })
         for address, value in values.items():
             sheet[address] = value
-        if document_kind == "QUOTATION":
+        if document_kind == "INVOICE":
             for cell_range in (
                 "A43:C43", "D43:F43", "G43:H43",
                 "A44:C44", "A45:C45", "D44:F44", "D45:F45",
@@ -2588,12 +3111,14 @@ class InvoiceApp(QMainWindow):
                     left=Side(), right=Side(), top=Side(), bottom=Side()
                 )
             for row in range(43, 47):
-                cell = sheet.cell(row, 8)
-                cell.border = Border(
-                    left=cell.border.left,
-                    right=footer_side,
-                    top=cell.border.top,
-                    bottom=cell.border.bottom,
+                for column in range(1, 9):
+                    sheet.cell(row, column).border = footer_border
+            for column in range(1, 4):
+                sheet.cell(46, column).border = Border(
+                    left=Side(),
+                    right=Side(),
+                    top=Side(),
+                    bottom=Side(),
                 )
             sheet["A2"].alignment = Alignment(
                 horizontal="center", vertical="center", wrap_text=True
@@ -2713,6 +3238,28 @@ class InvoiceApp(QMainWindow):
             sheet[address].alignment = Alignment(
                 horizontal="left", vertical="center", wrap_text=True
             )
+        for address in ("A8", "A9"):
+            sheet[address].alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+        for address in ("E8", "E9"):
+            sheet[address].alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+        for row in (8, 9):
+            sheet.cell(row, 5).font = copy(sheet.cell(row, 1).font)
+            sheet.cell(row, 4).border = Border(
+                left=sheet.cell(row, 4).border.left,
+                right=Side(),
+                top=sheet.cell(row, 4).border.top,
+                bottom=sheet.cell(row, 4).border.bottom,
+            )
+            sheet.cell(row, 5).border = Border(
+                left=Side(),
+                right=sheet.cell(row, 5).border.right,
+                top=sheet.cell(row, 5).border.top,
+                bottom=sheet.cell(row, 5).border.bottom,
+            )
         for address in ("F44", "F45", "F46"):
             sheet[address].alignment = Alignment(
                 horizontal="left", vertical="center", wrap_text=True
@@ -2795,7 +3342,7 @@ class InvoiceApp(QMainWindow):
             )
             sheet.add_image(signature)
 
-        if document_kind == "QUOTATION":
+        if document_kind == "INVOICE" and self.bank_upi_id.text().strip():
             payment_amount = money(
                 total * Decimal(str(self.payment_percent.value())) / 100
             )
@@ -2872,15 +3419,12 @@ class InvoiceApp(QMainWindow):
 
     def save_document_bundle(self, show_dialog=True):
 
-        if not self.save_invoice(show_dialog=False):
+        if not self.save_invoice(
+            show_dialog=show_dialog,
+            show_success=False,
+        ):
             if self.private_move_cancelled:
                 self.private_move_cancelled = False
-                return False
-            QMessageBox.warning(
-                self,
-                "Save Failed",
-                "Check that the document has an item and the quotation payment details are complete.",
-            )
             return False
 
         if not self.export_pdf(show_dialog=False):
@@ -2894,10 +3438,14 @@ class InvoiceApp(QMainWindow):
         self.remove_moved_private_files()
 
         invoice_no = int(self.invoice_no.text())
+        document_kind = document_kind_for_selection(
+            self.document_kind.currentIndex()
+        )
         with sqlite3.connect(DB_PATH) as con:
             xlsx_path, pdf_path = con.execute(
-                "SELECT xlsx_path, pdf_path FROM invoices WHERE invoice_no = ?",
-                (invoice_no,),
+                """SELECT xlsx_path, pdf_path FROM invoices
+                   WHERE invoice_no = ? AND document_kind = ?""",
+                (invoice_no, document_kind),
             ).fetchone()
         downloads_location = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DownloadLocation
@@ -2926,9 +3474,11 @@ class InvoiceApp(QMainWindow):
         return True
 
 
-    def save_invoice(self, show_dialog=True):
+    def save_invoice(self, show_dialog=True, show_success=None):
 
         try:
+            if show_success is None:
+                show_success = show_dialog
             self.pending_private_move_paths = []
             self.private_move_cancelled = False
             invoice_no = int(self.invoice_no.text())
@@ -2945,18 +3495,6 @@ class InvoiceApp(QMainWindow):
                 self.document_kind.currentIndex()
             )
             scanner_path = None
-            if (
-                document_kind == "QUOTATION"
-                and not self.bank_upi_id.text().strip()
-            ):
-                if show_dialog:
-                    QMessageBox.warning(
-                        self,
-                        "Payment Address Required",
-                        "Choose a bank profile with a UPI ID to create an amount-specific payment QR.",
-                    )
-                return False
-
             document_root = (
                 self.custom_output_dir
                 or (
@@ -2977,8 +3515,8 @@ class InvoiceApp(QMainWindow):
             with sqlite3.connect(DB_PATH) as con:
                 existing_invoice = con.execute(
                     "SELECT xlsx_path, pdf_path, customer_name, document_kind "
-                    "FROM invoices WHERE invoice_no = ?",
-                    (invoice_no,),
+                    "FROM invoices WHERE invoice_no = ? AND document_kind = ?",
+                    (invoice_no, document_kind),
                 ).fetchone()
             if existing_invoice and existing_invoice[0]:
                 previous_xlsx = Path(existing_invoice[0])
@@ -3005,7 +3543,7 @@ class InvoiceApp(QMainWindow):
                         existing_invoice[0],
                         existing_invoice[1],
                     ]
-                    if existing_invoice[3] == "QUOTATION":
+                    if existing_invoice[3] in ("INVOICE", "QUOTATION"):
                         private_qr_path = (
                             PRIVATE_INVOICE_DIR
                             / document_folder
@@ -3015,7 +3553,7 @@ class InvoiceApp(QMainWindow):
                                 invoice_no,
                                 existing_invoice[2],
                                 "_payment.png",
-                                "QUOTATION",
+                                existing_invoice[3],
                             )
                         )
                         self.pending_private_move_paths.append(private_qr_path)
@@ -3041,9 +3579,7 @@ class InvoiceApp(QMainWindow):
                     str(output),
                     document_kind,
                     scanner_path,
-                    self.bank_upi_id.text().strip()
-                    if document_kind == "QUOTATION"
-                    else "",
+                    self.bank_upi_id.text().strip(),
                     invoice_no,
                 )
                 if existing_invoice:
@@ -3053,9 +3589,9 @@ class InvoiceApp(QMainWindow):
                         SET invoice_date = ?, invoice_type = ?, customer_name = ?,
                             grand_total = ?, xlsx_path = ?, document_kind = ?,
                             qr_scanner_path = ?, payment_address = ?
-                        WHERE invoice_no = ?
+                        WHERE invoice_no = ? AND document_kind = ?
                         """,
-                        values,
+                        (*values, document_kind),
                     )
                 else:
                     con.execute(
@@ -3070,9 +3606,10 @@ class InvoiceApp(QMainWindow):
                     )
 
             self.loaded_invoice_no = invoice_no
+            self.save_document_draft(document_kind)
             self.refresh_invoice_history()
             self.statusBar().showMessage(f"{document_kind.title()} saved: {output}")
-            if show_dialog:
+            if show_dialog and show_success:
                 QMessageBox.information(
                     self,
                     f"{document_kind.title()} Saved",
@@ -3252,14 +3789,15 @@ class InvoiceApp(QMainWindow):
 
                     SET pdf_path = ?
 
-                    WHERE invoice_no = ?
+                    WHERE invoice_no = ? AND document_kind = ?
                     """,
 
                     (
                         str(
                             generated_pdf
                         ),
-                        invoice_no
+                            invoice_no,
+                            document_kind,
                     )
 
                 )
