@@ -222,11 +222,9 @@ class InvoiceApp(QMainWindow):
 
         self.create_ui()
 
-        document_kind = document_kind_for_selection(
-            self.document_kind.currentIndex()
-        )
-        if not self.restore_document_draft(document_kind):
-            self.new_invoice()
+        self.delete_document_draft("INVOICE")
+        self.delete_document_draft("QUOTATION")
+        self.new_invoice()
 
 
     # ========================================================
@@ -1090,6 +1088,7 @@ class InvoiceApp(QMainWindow):
         if not row:
             self.loaded_invoice_no = None
             self.refresh_invoice_payments()
+            self.refresh_invoice_request_history()
             self.statusBar().showMessage(
                 f"No saved invoice found for number {invoice_no}"
             )
@@ -2765,6 +2764,7 @@ class InvoiceApp(QMainWindow):
             ):
                 self.items.item(row_index, column).setText(item_data.get(key, ""))
         self.refresh()
+        self.refresh_invoice_request_history()
         return True
 
 
