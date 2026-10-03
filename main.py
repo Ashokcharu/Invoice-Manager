@@ -8,15 +8,18 @@ import re
 import json
 import tempfile
 import webbrowser
+from datetime import datetime
 from copy import copy
 from urllib.parse import quote
 
 from pathlib import Path
 from decimal import Decimal, ROUND_HALF_UP
 
-from PySide6.QtCore import QDate, Qt, QStandardPaths, QUrl
+from PySide6.QtCore import QDate, QEvent, QTimer, Qt, QStandardPaths, QUrl
 from PySide6.QtCore import QMimeData
-from PySide6.QtGui import QFont, QAction, QImage, QImageReader, QColor, QBrush
+from PySide6.QtGui import (
+    QFont, QAction, QImage, QImageReader, QColor, QBrush, QDesktopServices,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -39,11 +42,14 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QToolButton,
     QScrollArea,
+    QTabWidget,
     QFileDialog,
     QTextEdit,
     QCheckBox,
     QListWidget,
     QListWidgetItem,
+    QDialog,
+    QDialogButtonBox,
 )
 
 from openpyxl import load_workbook
@@ -161,7 +167,32 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
+class AmountEntryDoubleSpinBox(NoWheelDoubleSpinBox):
+
+    def __init__(self):
+        super().__init__()
+        self.lineEdit().installEventFilter(self)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.selectAll()
+
+    def eventFilter(self, watched, event):
+        if (
+            watched is self.lineEdit()
+            and event.type() == QEvent.Type.MouseButtonPress
+        ):
+            QTimer.singleShot(0, self.selectAll)
+        return super().eventFilter(watched, event)
+
+
 class NoWheelComboBox(QComboBox):
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelDateEdit(QDateEdit):
 
     def wheelEvent(self, event):
         event.ignore()
@@ -340,7 +371,7 @@ class InvoiceApp(QMainWindow):
         """)
 
 
-    def spinbox_with_arrows(self, spinbox):
+    def spinbox_with_arrows(self, spinbox, step_size=1):
 
         spinbox.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         container = QWidget()
@@ -354,8 +385,8 @@ class InvoiceApp(QMainWindow):
         buttons_layout.setContentsMargins(0, 0, 0, 0)
         buttons_layout.setSpacing(0)
         for arrow_type, step, tooltip in (
-            (Qt.ArrowType.UpArrow, 1, "Increase"),
-            (Qt.ArrowType.DownArrow, -1, "Decrease"),
+            (Qt.ArrowType.UpArrow, step_size, "Increase"),
+            (Qt.ArrowType.DownArrow, -step_size, "Decrease"),
         ):
             button = QToolButton()
             button.setArrowType(arrow_type)
@@ -547,25 +578,102 @@ class InvoiceApp(QMainWindow):
                 )
                 """
             )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS invoice_payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_kind TEXT NOT NULL DEFAULT 'INVOICE',
+                    invoice_no INTEGER NOT NULL,
+                    paid_on TEXT NOT NULL,
+                    amount REAL NOT NULL CHECK (amount > 0),
+                    method TEXT NOT NULL,
+                    reference TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE INDEX IF NOT EXISTS invoice_payments_document
+                ON invoice_payments (document_kind, invoice_no)
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS invoice_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    invoice_no INTEGER NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    request_percent REAL NOT NULL,
+                    request_amount REAL NOT NULL,
+                    pdf_path TEXT NOT NULL,
+                    qr_path TEXT NOT NULL DEFAULT '',
+                    payment_update_path TEXT NOT NULL DEFAULT '',
+                    final_pdf_path TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            request_columns = {
+                row[1] for row in con.execute("PRAGMA table_info(invoice_requests)")
+            }
+            if "payment_update_path" not in request_columns:
+                con.execute(
+                    "ALTER TABLE invoice_requests ADD COLUMN "
+                    "payment_update_path TEXT NOT NULL DEFAULT ''"
+                )
+            if "final_pdf_path" not in request_columns:
+                con.execute(
+                    "ALTER TABLE invoice_requests ADD COLUMN "
+                    "final_pdf_path TEXT NOT NULL DEFAULT ''"
+                )
+            con.execute(
+                """
+                CREATE INDEX IF NOT EXISTS invoice_requests_document
+                ON invoice_requests (invoice_no, requested_at)
+                """
+            )
 
 
     def prune_missing_invoice_records(self):
 
         with sqlite3.connect(DB_PATH) as con:
             records = con.execute(
-                "SELECT id, xlsx_path, pdf_path FROM invoices"
+                "SELECT id, invoice_no, document_kind, xlsx_path, pdf_path FROM invoices"
             ).fetchall()
+            saved_request_numbers = {
+                invoice_no
+                for invoice_no, pdf_path in con.execute(
+                    "SELECT invoice_no, pdf_path FROM invoice_requests"
+                )
+                if pdf_path and Path(pdf_path).is_file()
+            }
             missing_invoice_numbers = [
-                record_id
-                for record_id, xlsx_path, pdf_path in records
+                (record_id, invoice_no, document_kind)
+                for record_id, invoice_no, document_kind, xlsx_path, pdf_path in records
                 if not any(
                     path and Path(path).is_file()
                     for path in (xlsx_path, pdf_path)
                 )
+                and not (
+                    document_kind == "INVOICE"
+                    and invoice_no in saved_request_numbers
+                )
             ]
             con.executemany(
+                "DELETE FROM invoice_payments WHERE document_kind = ? AND invoice_no = ?",
+                ((kind, invoice_no) for _, invoice_no, kind in missing_invoice_numbers),
+            )
+            con.executemany(
+                "DELETE FROM invoice_requests WHERE invoice_no = ?",
+                (
+                    (invoice_no,)
+                    for _, invoice_no, kind in missing_invoice_numbers
+                    if kind == "INVOICE"
+                ),
+            )
+            con.executemany(
                 "DELETE FROM invoices WHERE id = ?",
-                ((record_id,) for record_id in missing_invoice_numbers),
+                ((record_id,) for record_id, _, _ in missing_invoice_numbers),
             )
 
 
@@ -893,26 +1001,54 @@ class InvoiceApp(QMainWindow):
         self.bank_selector.setCurrentIndex(max(0, profile_index))
 
 
-    def payment_uri(self, invoice_no, amount):
+    def payment_uri(self, invoice_no, amount=None):
 
-        return (
+        uri = (
             "upi://pay?"
             f"pa={quote(self.bank_upi_id.text().strip())}"
             f"&pn={quote(self.seller_name.text())}"
-            f"&am={money(amount):.2f}&cu=INR"
+            "&cu=INR"
             f"&tn={quote(str(invoice_no))}"
         )
+        if amount is not None:
+            uri += f"&am={money(amount):.2f}"
+        return uri
 
 
-    def quotation_payment_qr_path(self, invoice_no, invoice_date):
+    def invoice_storage_root(self, document_kind, invoice_no, grand_total=None):
 
-        document_root = (
+        root = (
             self.custom_output_dir
             or (
                 PRIVATE_INVOICE_DIR
                 if self.private_invoice_checkbox.isChecked()
                 else INVOICE_DIR
             )
+        )
+        if document_kind != "INVOICE":
+            return root
+
+        if grand_total is None:
+            with sqlite3.connect(DB_PATH) as con:
+                invoice = con.execute(
+                    "SELECT grand_total FROM invoices "
+                    "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                    (invoice_no,),
+                ).fetchone()
+            grand_total = invoice[0] if invoice else self.calculate()[3]
+
+        if money(grand_total or 0) > self.invoice_paid_total(invoice_no):
+            return root / "Pending"
+        return root
+
+
+    def quotation_payment_qr_path(self, invoice_no, invoice_date, grand_total=None):
+
+        document_kind = document_kind_for_selection(
+            self.document_kind.currentIndex()
+        )
+        document_root = self.invoice_storage_root(
+            document_kind, invoice_no, grand_total
         )
         return (
             document_root
@@ -953,6 +1089,7 @@ class InvoiceApp(QMainWindow):
 
         if not row:
             self.loaded_invoice_no = None
+            self.refresh_invoice_payments()
             self.statusBar().showMessage(
                 f"No saved invoice found for number {invoice_no}"
             )
@@ -966,6 +1103,7 @@ class InvoiceApp(QMainWindow):
                 f"The saved workbook could not be found:\n{workbook_path}",
             )
             return
+        self.reset_receipt_amount_autofill()
         self.private_invoice_checkbox.setChecked(
             workbook_path.is_relative_to(PRIVATE_INVOICE_DIR)
         )
@@ -1000,11 +1138,11 @@ class InvoiceApp(QMainWindow):
                 payment_address = ""
             self.bank_upi_id.setText(payment_address)
             payment_match = re.search(
-                r"(?:Advance|Scan to pay)\s+([\d.]+)%",
+                r"(?:Advance|Scan to pay|Collect|Balance|Payment Request)\s+([\d.]+)%",
                 cell_text("H44") or cell_text("G48") or cell_text("E2") or cell_text("A53"),
             )
             self.payment_percent.setValue(
-                float(payment_match.group(1)) if payment_match else 100
+                float(payment_match.group(1)) if payment_match else 50
             )
         self.invoice_date.setDate(QDate.fromString(row[0], "yyyy-MM-dd"))
         self.invoice_type.setCurrentIndex(0 if row[1] == "IGST" else 1)
@@ -1142,6 +1280,8 @@ class InvoiceApp(QMainWindow):
 
         self.refresh_item_row_controls()
         self.refresh()
+        self.refresh_invoice_payments()
+        self.refresh_invoice_request_history()
         self.statusBar().showMessage(f"Invoice {invoice_no} loaded for editing")
 
 
@@ -1180,9 +1320,15 @@ class InvoiceApp(QMainWindow):
             "color:#666666;"
         )
 
+        self.main_tabs = QTabWidget()
         self.invoice_tab = QWidget()
         self.create_invoice_tab()
-        self.setCentralWidget(self.invoice_tab)
+        self.main_tabs.addTab(self.invoice_tab, "+ Create Invoice and Quotation")
+        self.create_pending_invoices_tab()
+        self.main_tabs.addTab(self.pending_invoices_tab, "Unpaid Invoices")
+        self.create_quotation_register_tab()
+        self.main_tabs.addTab(self.quotation_register_tab, "Quotations")
+        self.setCentralWidget(self.main_tabs)
         return
 
         self.invoice_type = NoWheelComboBox()
@@ -1195,12 +1341,7 @@ class InvoiceApp(QMainWindow):
         self.invoice_type.currentIndexChanged.connect(
             self.refresh
         )
-
-
-        self.invoice_no = QLineEdit()
-
-
-        self.invoice_date = QDateEdit()
+        self.invoice_date = NoWheelDateEdit()
 
         self.invoice_date.setCalendarPopup(
             True
@@ -1704,18 +1845,62 @@ class InvoiceApp(QMainWindow):
 
         layout = QVBoxLayout(self.invoice_tab)
         scroll_area = QScrollArea()
+        self.invoice_scroll_area = scroll_area
         scroll_area.setWidgetResizable(True)
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(18, 18, 18, 18)
 
-        history_box = QGroupBox("Recent Documents · Last 10")
-        history_layout = QVBoxLayout(history_box)
-        self.invoice_history = QListWidget()
-        self.invoice_history.setFixedHeight(150)
-        self.invoice_history.setUniformItemSizes(True)
-        self.invoice_history.itemClicked.connect(self.load_history_invoice)
-        history_layout.addWidget(self.invoice_history)
+        self.invoice_request_history_box = QGroupBox("Payment Request History")
+        history_layout = QVBoxLayout(self.invoice_request_history_box)
+        history_actions = QHBoxLayout()
+        self.open_invoice_request_button = QPushButton("Open PDF")
+        self.open_invoice_request_button.clicked.connect(
+            self.open_selected_invoice_request
+        )
+        self.download_invoice_request_button = QPushButton("Download PDF")
+        self.download_invoice_request_button.clicked.connect(
+            self.download_selected_invoice_request
+        )
+        self.send_paid_invoice_button = QPushButton("Send Paid PDF")
+        self.send_paid_invoice_button.clicked.connect(
+            self.send_selected_paid_invoice
+        )
+        self.open_invoice_request_button.setEnabled(False)
+        self.download_invoice_request_button.setEnabled(False)
+        self.send_paid_invoice_button.setEnabled(False)
+        history_actions.addWidget(self.open_invoice_request_button)
+        history_actions.addWidget(self.download_invoice_request_button)
+        history_actions.addWidget(self.send_paid_invoice_button)
+        history_actions.addStretch()
+        history_layout.addLayout(history_actions)
+        self.invoice_request_history_table = QTableWidget(0, 4)
+        self.invoice_request_history_table.setHorizontalHeaderLabels(
+            ["Date / Time", "Payment Request", "Status", "PDF"]
+        )
+        self.invoice_request_history_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.invoice_request_history_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.invoice_request_history_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.invoice_request_history_table.verticalHeader().setVisible(False)
+        self.invoice_request_history_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch
+        )
+        self.invoice_request_history_table.setMinimumHeight(240)
+        self.invoice_request_history_table.setMaximumHeight(360)
+        self.invoice_request_history_table.itemSelectionChanged.connect(
+            self.update_invoice_request_actions
+        )
+        self.invoice_request_history_table.cellDoubleClicked.connect(
+            lambda row, column: self.open_selected_invoice_request()
+        )
+        history_layout.addWidget(self.invoice_request_history_table)
+        self.invoice_request_history_box.setVisible(False)
 
         seller_box = QGroupBox("Seller Details")
         seller_grid = QGridLayout(seller_box)
@@ -1783,7 +1968,7 @@ class InvoiceApp(QMainWindow):
         self.document_kind = NoWheelComboBox()
         self.document_kind.addItems(["Invoice", "Quotation"])
         self.document_number_label = QLabel("Invoice No")
-        self.invoice_date = QDateEdit(QDate.currentDate())
+        self.invoice_date = NoWheelDateEdit(QDate.currentDate())
         self.invoice_date.setCalendarPopup(True)
         self.invoice_date.setDisplayFormat("dd/MM/yyyy")
         self.invoice_date.setKeyboardTracking(False)
@@ -1807,17 +1992,93 @@ class InvoiceApp(QMainWindow):
         party_grid.addWidget(invoice_box, 0, 1)
         page_layout.addLayout(party_grid)
 
-        self.payment_box = QGroupBox("Quotation Payment")
-        payment_form = QFormLayout(self.payment_box)
         self.payment_percent = NoWheelDoubleSpinBox()
-        self.payment_percent.setRange(1, 100)
+        self.payment_percent.setRange(0, 100)
         self.payment_percent.setDecimals(2)
-        self.payment_percent.setValue(100)
-        self.payment_percent.setSuffix(" % to collect")
-        payment_form.addRow(
-            "Amount to collect", self.spinbox_with_arrows(self.payment_percent)
+        self.payment_percent.setValue(50)
+        self.payment_percent.setSuffix(" % of invoice")
+        self.payment_percent.valueChanged.connect(self.refresh_payment_request)
+
+        self.invoice_payments_box = QGroupBox("Invoice Receipts")
+        invoice_payments_layout = QVBoxLayout(self.invoice_payments_box)
+        receipt_form = QFormLayout()
+        receipt_form.addRow(
+            "Payment Request",
+            self.spinbox_with_arrows(self.payment_percent, step_size=5),
         )
-        self.payment_box.setVisible(False)
+        self.payment_request_amount = QLabel("₹0.00")
+        receipt_form.addRow("Request amount", self.payment_request_amount)
+        self.remaining_percent_label = QLabel("Balance remaining: 100%")
+        receipt_form.addRow("Invoice balance", self.remaining_percent_label)
+        self.receipt_amount = AmountEntryDoubleSpinBox()
+        self.receipt_amount.setRange(0, 999999999.99)
+        self.receipt_amount.setDecimals(2)
+        self.receipt_amount.setPrefix("₹ ")
+        self._auto_receipt_amount = Decimal("0.00")
+        self._receipt_amount_manual_override = False
+        self._updating_receipt_amount = False
+        self.receipt_amount.valueChanged.connect(
+            self.track_receipt_amount_override
+        )
+        self.receipt_method = NoWheelComboBox()
+        self.receipt_method.addItems(
+            ["Cash", "UPI", "Bank Transfer", "Cheque", "Other"]
+        )
+        self.receipt_date = NoWheelDateEdit(QDate.currentDate())
+        self.receipt_date.setCalendarPopup(True)
+        self.receipt_date.setDisplayFormat("dd/MM/yyyy")
+        self.receipt_reference = QLineEdit()
+        self.receipt_reference.setPlaceholderText("Optional transaction / receipt reference")
+        receipt_form.addRow(
+            "Amount received", self.spinbox_with_arrows(self.receipt_amount)
+        )
+        receipt_form.addRow("Payment method", self.receipt_method)
+        receipt_form.addRow("Payment date", self.receipt_date)
+        receipt_form.addRow("Reference", self.receipt_reference)
+        invoice_payments_layout.addLayout(receipt_form)
+        self.record_payment_button = QPushButton("Record Payment")
+        self.record_payment_button.clicked.connect(self.record_invoice_payment)
+        self.record_payment_button.setMaximumWidth(160)
+        self.record_payment_button.setMinimumHeight(34)
+        self.edit_payment_button = QPushButton("Edit Selected")
+        self.edit_payment_button.clicked.connect(self.edit_selected_invoice_payment)
+        self.delete_payment_button = QPushButton("Delete Selected")
+        self.delete_payment_button.clicked.connect(self.delete_selected_invoice_payment)
+        self.edit_payment_button.setEnabled(False)
+        self.delete_payment_button.setEnabled(False)
+        payment_actions = QHBoxLayout()
+        payment_actions.addWidget(self.record_payment_button)
+        payment_actions.addWidget(self.edit_payment_button)
+        payment_actions.addWidget(self.delete_payment_button)
+        payment_actions.addStretch()
+        self.invoice_payment_summary = QLabel("Save the invoice before recording payments.")
+        payment_actions.addWidget(self.invoice_payment_summary, 1)
+        invoice_payments_layout.addLayout(payment_actions)
+        self.invoice_payments_table = QTableWidget(0, 4)
+        self.invoice_payments_table.setHorizontalHeaderLabels(
+            ["Date", "Amount", "Method", "Reference"]
+        )
+        self.invoice_payments_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.invoice_payments_table.verticalHeader().setVisible(False)
+        self.invoice_payments_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch
+        )
+        self.invoice_payments_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.invoice_payments_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.invoice_payments_table.setMinimumHeight(160)
+        self.invoice_payments_table.setMaximumHeight(240)
+        self.invoice_payments_table.itemSelectionChanged.connect(
+            self.update_invoice_payment_actions
+        )
+        invoice_payments_layout.addWidget(self.invoice_payments_table)
+        self.record_payment_button.setEnabled(False)
+        self.invoice_payments_box.setVisible(False)
 
         items_box = QGroupBox("Items")
         items_layout = QVBoxLayout(items_box)
@@ -1922,8 +2183,8 @@ class InvoiceApp(QMainWindow):
             bank_grid.addWidget(field, row, 1)
         bank_grid.addWidget(self.bank_upi_label, 4, 0)
         bank_grid.addWidget(self.bank_upi_id, 4, 1)
+        page_layout.addWidget(self.invoice_payments_box)
         page_layout.addWidget(bank_box)
-        page_layout.addWidget(self.payment_box)
 
         footer_box = QGroupBox("Invoice Footer")
         footer_grid = QGridLayout(footer_box)
@@ -1973,6 +2234,12 @@ class InvoiceApp(QMainWindow):
         self.whatsapp_button = QPushButton("WhatsApp Invoice")
         self.whatsapp_button.clicked.connect(self.share_document_whatsapp)
         self.whatsapp_button.setVisible(False)
+        self.confirm_order_button = QPushButton("Order Confirmed · Add to Invoice")
+        self.confirm_order_button.clicked.connect(self.convert_quotation_to_invoice)
+        self.confirm_order_button.setVisible(False)
+        self.attach_invoice_checkbox = QCheckBox("Attach invoice when sharing")
+        self.attach_invoice_checkbox.setChecked(True)
+        self.attach_invoice_checkbox.setVisible(False)
         self.save_document_button = QPushButton("Save Invoice")
         self.save_document_button.setObjectName("primary")
         self.save_document_button.clicked.connect(
@@ -1983,9 +2250,11 @@ class InvoiceApp(QMainWindow):
         action_row.addWidget(self.private_invoice_checkbox)
         action_row.addWidget(self.save_document_button)
         action_row.addWidget(self.whatsapp_button)
+        action_row.addWidget(self.confirm_order_button)
+        action_row.addWidget(self.attach_invoice_checkbox)
         action_row.addStretch()
         page_layout.addLayout(action_row)
-        page_layout.addWidget(history_box)
+        page_layout.addWidget(self.invoice_request_history_box)
 
         scroll_area.setWidget(page)
         layout.addWidget(scroll_area)
@@ -1998,6 +2267,368 @@ class InvoiceApp(QMainWindow):
         self.refresh_bank_profiles()
         self.refresh_invoice_history()
         self.document_kind_changed(self.document_kind.currentIndex())
+
+
+    def create_pending_invoices_tab(self):
+
+        self.pending_invoices_tab = QWidget()
+        layout = QVBoxLayout(self.pending_invoices_tab)
+        toolbar = QHBoxLayout()
+        self.pending_invoice_search = QLineEdit()
+        self.pending_invoice_search.setPlaceholderText(
+            "Search customer or invoice number"
+        )
+        self.pending_invoice_search.textChanged.connect(
+            lambda value: self.reset_pending_invoice_page()
+        )
+        toolbar.addWidget(self.pending_invoice_search, 1)
+        self.include_paid_invoices = QCheckBox("Include paid invoices")
+        self.include_paid_invoices.toggled.connect(
+            lambda checked: self.reset_pending_invoice_page()
+        )
+        toolbar.addWidget(self.include_paid_invoices)
+        self.open_pending_invoice_button = QPushButton("Open Selected Invoice")
+        self.open_pending_invoice_button.clicked.connect(
+            self.open_selected_pending_invoice
+        )
+        toolbar.addWidget(self.open_pending_invoice_button)
+        layout.addLayout(toolbar)
+
+        self.pending_invoices_table = QTableWidget(0, 6)
+        self.pending_invoices_table.setHorizontalHeaderLabels(
+            ["Invoice No", "Date", "Customer", "Total", "Received", "Balance Due"]
+        )
+        self.pending_invoices_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.pending_invoices_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.pending_invoices_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.pending_invoices_table.verticalHeader().setVisible(False)
+        self.pending_invoices_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.pending_invoices_table.cellDoubleClicked.connect(
+            lambda row, column: self.open_selected_pending_invoice()
+        )
+        layout.addWidget(self.pending_invoices_table, 1)
+
+        pagination = QHBoxLayout()
+        self.pending_previous_button = QPushButton("Previous")
+        self.pending_previous_button.clicked.connect(
+            lambda checked=False: self.change_pending_invoice_page(-1)
+        )
+        self.pending_page_label = QLabel("Page 1 of 1")
+        self.pending_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pending_next_button = QPushButton("Next")
+        self.pending_next_button.clicked.connect(
+            lambda checked=False: self.change_pending_invoice_page(1)
+        )
+        pagination.addWidget(self.pending_previous_button)
+        pagination.addWidget(self.pending_page_label, 1)
+        pagination.addWidget(self.pending_next_button)
+        layout.addLayout(pagination)
+
+        self.pending_invoice_page = 0
+        self.pending_invoice_page_size = 20
+        self.refresh_pending_invoices()
+
+
+    def reset_pending_invoice_page(self):
+
+        self.pending_invoice_page = 0
+        self.refresh_pending_invoices()
+
+
+    def change_pending_invoice_page(self, offset):
+
+        self.pending_invoice_page += offset
+        self.refresh_pending_invoices()
+
+
+    def refresh_pending_invoices(self):
+
+        if not hasattr(self, "pending_invoices_table"):
+            return
+
+        search = self.pending_invoice_search.text().strip()
+        search_pattern = f"%{search}%"
+        paid_filter = "" if self.include_paid_invoices.isChecked() else (
+            "COALESCE(i.grand_total, 0) - COALESCE(SUM(p.amount), 0) > 0.005 AND "
+        )
+        with sqlite3.connect(DB_PATH) as con:
+            rows = con.execute(
+                f"""
+                SELECT i.invoice_no, i.invoice_date, i.customer_name,
+                       i.grand_total, COALESCE(SUM(p.amount), 0) AS received
+                FROM invoices AS i
+                LEFT JOIN invoice_payments AS p
+                  ON p.document_kind = i.document_kind
+                 AND p.invoice_no = i.invoice_no
+                WHERE i.document_kind = 'INVOICE'
+                GROUP BY i.id
+                HAVING {paid_filter}
+                   (COALESCE(i.customer_name, '') LIKE ?
+                    OR CAST(i.invoice_no AS TEXT) LIKE ?)
+                ORDER BY i.invoice_date DESC, i.invoice_no DESC
+                """,
+                (search_pattern, search_pattern),
+            ).fetchall()
+
+        page_count = max(
+            1,
+            (len(rows) + self.pending_invoice_page_size - 1)
+            // self.pending_invoice_page_size,
+        )
+        self.pending_invoice_page = min(
+            max(0, self.pending_invoice_page), page_count - 1
+        )
+        start = self.pending_invoice_page * self.pending_invoice_page_size
+        page_rows = rows[start:start + self.pending_invoice_page_size]
+        self.pending_invoices_table.setRowCount(len(page_rows))
+        for row_index, (invoice_no, invoice_date, customer, total, received) in enumerate(page_rows):
+            balance_due = max(Decimal("0.00"), money(Decimal(str(total or 0)) - Decimal(str(received or 0))))
+            values = (
+                str(invoice_no),
+                QDate.fromString(invoice_date, "yyyy-MM-dd").toString("dd/MM/yyyy"),
+                customer or "Unnamed buyer",
+                f"₹{money(total or 0):,.2f}",
+                f"₹{money(received or 0):,.2f}",
+                f"₹{balance_due:,.2f}",
+            )
+            for column, value in enumerate(values):
+                self.pending_invoices_table.setItem(
+                    row_index, column, QTableWidgetItem(value)
+                )
+
+        self.pending_page_label.setText(
+            f"Page {self.pending_invoice_page + 1} of {page_count} · {len(rows)} invoices"
+        )
+        self.pending_previous_button.setEnabled(self.pending_invoice_page > 0)
+        self.pending_next_button.setEnabled(self.pending_invoice_page + 1 < page_count)
+        self.open_pending_invoice_button.setEnabled(bool(page_rows))
+
+
+    def open_selected_pending_invoice(self):
+
+        row = self.pending_invoices_table.currentRow()
+        if row < 0:
+            return
+
+        invoice_number = self.pending_invoices_table.item(row, 0)
+        if not invoice_number:
+            return
+
+        self.document_kind.setCurrentIndex(0)
+        self.invoice_no.setText(invoice_number.text())
+        self.load_invoice()
+        self.main_tabs.setCurrentWidget(self.invoice_tab)
+
+
+    def create_quotation_register_tab(self):
+
+        self.quotation_register_tab = QWidget()
+        layout = QVBoxLayout(self.quotation_register_tab)
+        toolbar = QHBoxLayout()
+        self.quotation_search = QLineEdit()
+        self.quotation_search.setPlaceholderText(
+            "Search customer or quotation number"
+        )
+        self.quotation_search.textChanged.connect(
+            lambda value: self.reset_quotation_page()
+        )
+        toolbar.addWidget(self.quotation_search, 1)
+        self.open_quotation_button = QPushButton("Open Selected Quotation")
+        self.open_quotation_button.clicked.connect(self.open_selected_quotation)
+        toolbar.addWidget(self.open_quotation_button)
+        self.convert_selected_quotation_button = QPushButton(
+            "Order Confirmed · Add to Invoice"
+        )
+        self.convert_selected_quotation_button.clicked.connect(
+            self.convert_selected_quotation_to_invoice
+        )
+        self.convert_selected_quotation_button.setEnabled(False)
+        toolbar.addWidget(self.convert_selected_quotation_button)
+        layout.addLayout(toolbar)
+
+        self.quotation_table = QTableWidget(0, 4)
+        self.quotation_table.setHorizontalHeaderLabels(
+            ["Quotation No", "Date", "Customer", "Total"]
+        )
+        self.quotation_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.quotation_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.quotation_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.quotation_table.itemSelectionChanged.connect(
+            self.update_quotation_actions
+        )
+        self.quotation_table.verticalHeader().setVisible(False)
+        self.quotation_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.quotation_table.cellDoubleClicked.connect(
+            lambda row, column: self.open_selected_quotation()
+        )
+        layout.addWidget(self.quotation_table, 1)
+
+        pagination = QHBoxLayout()
+        self.quotation_previous_button = QPushButton("Previous")
+        self.quotation_previous_button.clicked.connect(
+            lambda checked=False: self.change_quotation_page(-1)
+        )
+        self.quotation_page_label = QLabel("Page 1 of 1")
+        self.quotation_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.quotation_next_button = QPushButton("Next")
+        self.quotation_next_button.clicked.connect(
+            lambda checked=False: self.change_quotation_page(1)
+        )
+        pagination.addWidget(self.quotation_previous_button)
+        pagination.addWidget(self.quotation_page_label, 1)
+        pagination.addWidget(self.quotation_next_button)
+        layout.addLayout(pagination)
+
+        self.quotation_page = 0
+        self.quotation_page_size = 20
+        self.refresh_quotation_register()
+
+
+    def reset_quotation_page(self):
+
+        self.quotation_page = 0
+        self.refresh_quotation_register()
+
+
+    def change_quotation_page(self, offset):
+
+        self.quotation_page += offset
+        self.refresh_quotation_register()
+
+
+    def refresh_quotation_register(self):
+
+        if not hasattr(self, "quotation_table"):
+            return
+
+        search_pattern = f"%{self.quotation_search.text().strip()}%"
+        with sqlite3.connect(DB_PATH) as con:
+            rows = con.execute(
+                """
+                SELECT invoice_no, invoice_date, customer_name, grand_total
+                FROM invoices
+                WHERE document_kind = 'QUOTATION'
+                  AND (COALESCE(customer_name, '') LIKE ?
+                       OR CAST(invoice_no AS TEXT) LIKE ?)
+                ORDER BY invoice_date DESC, invoice_no DESC
+                """,
+                (search_pattern, search_pattern),
+            ).fetchall()
+
+        page_count = max(
+            1,
+            (len(rows) + self.quotation_page_size - 1)
+            // self.quotation_page_size,
+        )
+        self.quotation_page = min(max(0, self.quotation_page), page_count - 1)
+        start = self.quotation_page * self.quotation_page_size
+        page_rows = rows[start:start + self.quotation_page_size]
+        self.quotation_table.setRowCount(len(page_rows))
+        for row_index, (number, date, customer, total) in enumerate(page_rows):
+            values = (
+                str(number),
+                QDate.fromString(date, "yyyy-MM-dd").toString("dd/MM/yyyy"),
+                customer or "Unnamed buyer",
+                f"₹{money(total or 0):,.2f}",
+            )
+            for column, value in enumerate(values):
+                self.quotation_table.setItem(
+                    row_index, column, QTableWidgetItem(value)
+                )
+
+        self.quotation_page_label.setText(
+            f"Page {self.quotation_page + 1} of {page_count} · {len(rows)} quotations"
+        )
+        self.quotation_previous_button.setEnabled(self.quotation_page > 0)
+        self.quotation_next_button.setEnabled(self.quotation_page + 1 < page_count)
+        self.update_quotation_actions()
+
+
+    def update_quotation_actions(self):
+
+        selected = self.quotation_table.currentRow() >= 0
+        self.open_quotation_button.setEnabled(selected)
+        self.convert_selected_quotation_button.setEnabled(selected)
+
+
+    def open_selected_quotation(self):
+
+        row = self.quotation_table.currentRow()
+        if row < 0:
+            return
+        quotation_number = self.quotation_table.item(row, 0)
+        if not quotation_number:
+            return
+
+        self.document_kind.setCurrentIndex(1)
+        self.invoice_no.setText(quotation_number.text())
+        self.load_invoice()
+        self.main_tabs.setCurrentWidget(self.invoice_tab)
+
+
+    def convert_selected_quotation_to_invoice(self):
+
+        row = self.quotation_table.currentRow()
+        if row < 0:
+            return
+        quotation_number = self.quotation_table.item(row, 0)
+        if not quotation_number:
+            return
+
+        self.document_kind.setCurrentIndex(1)
+        self.invoice_no.setText(quotation_number.text())
+        self.load_invoice()
+        if self.loaded_invoice_no != int(quotation_number.text()):
+            return
+        self.main_tabs.setCurrentWidget(self.invoice_tab)
+        self.convert_quotation_to_invoice()
+
+
+    def convert_quotation_to_invoice(self):
+
+        if document_kind_for_selection(self.document_kind.currentIndex()) != "QUOTATION":
+            return
+
+        quotation_state = self.capture_document_draft()
+        if not quotation_state["items"]:
+            QMessageBox.warning(
+                self, "Quotation Has No Items", "Add at least one item before creating an invoice."
+            )
+            return
+
+        self.save_document_draft("QUOTATION")
+        self.document_kind.setCurrentIndex(0)
+        quotation_state.update({
+            "invoice_no": str(self.next_invoice_number("INVOICE")),
+            "invoice_date": QDate.currentDate().toString("yyyy-MM-dd"),
+            "payment_percent": 50,
+            "private_invoice": False,
+        })
+        self.reset_receipt_amount_autofill()
+        self.loaded_invoice_no = None
+        self.apply_document_draft_state(quotation_state)
+        self.save_document_draft("INVOICE")
+        self.refresh_invoice_payments()
+        self.refresh_invoice_request_history()
+        self.main_tabs.setCurrentWidget(self.invoice_tab)
+        self.invoice_scroll_area.verticalScrollBar().setValue(0)
+        self.statusBar().showMessage(
+            f"Quotation confirmed. Invoice {self.invoice_no.text()} is ready to edit."
+        )
 
 
     def capture_document_draft(self):
@@ -2077,6 +2708,11 @@ class InvoiceApp(QMainWindow):
             return False
 
         state = json.loads(row[0])
+        return self.apply_document_draft_state(state)
+
+
+    def apply_document_draft_state(self, state):
+
         self.invoice_no.setText(state.get("invoice_no", ""))
         self.invoice_date.setDate(
             QDate.fromString(state.get("invoice_date", ""), "yyyy-MM-dd")
@@ -2111,7 +2747,7 @@ class InvoiceApp(QMainWindow):
         self.bank_selector.blockSignals(False)
         self.invoice_type.setCurrentIndex(state.get("invoice_type", 0))
         self.gst_rate.setValue(state.get("gst_rate", 5))
-        self.payment_percent.setValue(state.get("payment_percent", 100))
+        self.payment_percent.setValue(state.get("payment_percent", 50))
         self.declaration.setPlainText(state.get("declaration", ""))
         self.private_invoice_checkbox.setChecked(
             state.get("private_invoice", False)
@@ -2134,45 +2770,704 @@ class InvoiceApp(QMainWindow):
 
     def refresh_invoice_history(self):
 
-        if not hasattr(self, "invoice_history"):
+        if not hasattr(self, "invoice_request_history_table"):
             return
 
         self.prune_missing_invoice_records()
+        self.refresh_invoice_request_history()
+
+
+    def refresh_invoice_request_history(self):
+
+        if not hasattr(self, "invoice_request_history_table"):
+            return
+
+        self.invoice_request_history_table.setRowCount(0)
+        is_invoice = (
+            document_kind_for_selection(self.document_kind.currentIndex()) == "INVOICE"
+        )
+        self.invoice_request_history_box.setVisible(is_invoice)
+        if not is_invoice:
+            self.update_invoice_request_actions()
+            return
+
+        try:
+            invoice_no = int(self.invoice_no.text())
+        except ValueError:
+            self.update_invoice_request_actions()
+            return
+
         with sqlite3.connect(DB_PATH) as con:
-            invoices = con.execute(
+            requests = con.execute(
                 """
-                  SELECT invoice_no, invoice_date, customer_name, grand_total,
-                      document_kind
-                FROM invoices
-                ORDER BY created_at DESC, invoice_no DESC
-                LIMIT 10
+                  SELECT id, requested_at, request_percent, request_amount,
+                      pdf_path, payment_update_path, final_pdf_path
+                FROM invoice_requests
+                WHERE invoice_no = ?
+                ORDER BY requested_at DESC, id DESC
                 """
+            , (invoice_no,)).fetchall()
+            invoice = con.execute(
+                "SELECT grand_total FROM invoices "
+                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                (invoice_no,),
+            ).fetchone()
+            paid_total = con.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM invoice_payments "
+                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                (invoice_no,),
+            ).fetchone()[0]
+
+        fully_paid = bool(
+            invoice
+            and money(paid_total) >= money(invoice[0] or 0)
+            and money(invoice[0] or 0) > 0
+        )
+        received_percent = (
+            money(paid_total) / money(invoice[0]) * 100
+            if invoice and money(invoice[0] or 0) > 0 else Decimal("0")
+        )
+
+        for row, (
+            request_id, requested_at, percent, amount, original_pdf_path,
+            payment_update_path, final_pdf_path,
+        ) in enumerate(requests):
+            requested_time = datetime.fromisoformat(requested_at)
+            request_status = (
+                "Paid 100%" if fully_paid and row == 0
+                else f"Received {received_percent:g}%" if row == 0 and paid_total > 0
+                else "Earlier request" if row > 0
+                else "Outstanding"
+            )
+            display_pdf_path = final_pdf_path or payment_update_path or original_pdf_path
+            values = (
+                requested_time.strftime("%d/%m/%Y %H:%M:%S"),
+                f"{percent:g}% · ₹{money(amount):,.2f}",
+                request_status,
+                Path(display_pdf_path).name,
+            )
+            self.invoice_request_history_table.insertRow(row)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, request_id)
+                if fully_paid and row == 0 and column == 2:
+                    item.setBackground(QBrush(QColor("#dff2e3")))
+                    item.setForeground(QBrush(QColor("#245c37")))
+                self.invoice_request_history_table.setItem(row, column, item)
+        self.update_invoice_request_actions()
+
+
+    def update_invoice_request_actions(self):
+
+        row = self.invoice_request_history_table.currentRow()
+        selected = row >= 0
+        self.open_invoice_request_button.setEnabled(selected)
+        self.download_invoice_request_button.setEnabled(selected)
+        is_paid_request = (
+            selected
+            and self.invoice_request_history_table.item(row, 2).text() == "Paid 100%"
+        )
+        self.send_paid_invoice_button.setEnabled(is_paid_request)
+
+
+    def selected_invoice_request_path(self):
+
+        row = self.invoice_request_history_table.currentRow()
+        if row < 0:
+            return None
+        request_id = self.invoice_request_history_table.item(
+            row, 0
+        ).data(Qt.ItemDataRole.UserRole)
+        with sqlite3.connect(DB_PATH) as con:
+            result = con.execute(
+                """
+                SELECT COALESCE(
+                    NULLIF(final_pdf_path, ''),
+                    NULLIF(payment_update_path, ''),
+                    pdf_path
+                )
+                FROM invoice_requests
+                """
+                "WHERE id = ? AND invoice_no = ?",
+                (request_id, int(self.invoice_no.text())),
+            ).fetchone()
+        path = Path(result[0]) if result else None
+        return path if path and path.is_file() else None
+
+
+    def open_selected_invoice_request(self):
+
+        pdf_path = self.selected_invoice_request_path()
+        if not pdf_path:
+            QMessageBox.warning(self, "PDF Missing", "This request PDF could not be found.")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path.resolve()))):
+            QMessageBox.warning(
+                self, "PDF Could Not Be Opened", f"Open this PDF manually:\n{pdf_path}"
+            )
+
+
+    def download_selected_invoice_request(self):
+
+        pdf_path = self.selected_invoice_request_path()
+        if not pdf_path:
+            QMessageBox.warning(self, "PDF Missing", "This request PDF could not be found.")
+            return
+        destination, _ = QFileDialog.getSaveFileName(
+            self, "Download Request PDF", str(Path.home() / pdf_path.name),
+            "PDF files (*.pdf)",
+        )
+        if not destination:
+            return
+        try:
+            shutil.copy2(pdf_path, destination)
+        except OSError as error:
+            QMessageBox.warning(self, "Download Failed", str(error))
+            return
+        QMessageBox.information(self, "PDF Downloaded", destination)
+
+
+    def send_selected_paid_invoice(self):
+
+        if self.document_kind.currentIndex() != 0:
+            return
+        pdf_path = self.selected_invoice_request_path()
+        if not pdf_path:
+            QMessageBox.warning(self, "PDF Missing", "This paid invoice PDF could not be found.")
+            return
+
+        invoice_no = int(self.invoice_no.text())
+        with sqlite3.connect(DB_PATH) as con:
+            invoice = con.execute(
+                "SELECT grand_total, customer_name FROM invoices "
+                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                (invoice_no,),
+            ).fetchone()
+            paid_total = con.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM invoice_payments "
+                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                (invoice_no,),
+            ).fetchone()[0]
+        if not invoice or money(paid_total) < money(invoice[0] or 0):
+            QMessageBox.warning(
+                self, "Invoice Not Fully Paid", "Only a completed invoice can be sent from this action."
+            )
+            return
+
+        mobile = re.sub(r"\D", "", self.customer_mobile.text())
+        if len(mobile) == 10:
+            mobile = "91" + mobile
+        if not mobile:
+            QMessageBox.warning(
+                self, "Buyer Mobile Required", "Enter the buyer's mobile number before sharing."
+            )
+            return
+
+        message = "\n".join((
+            f"Hello {invoice[1] or 'Customer'},",
+            "",
+            f"Thank you for choosing {self.seller_name.text()} for your garments order.",
+            f"Please find attached the final paid invoice {invoice_no} for your records.",
+            "",
+            f"Invoice total: INR {money(invoice[0]):.2f}",
+            f"Received: INR {money(paid_total):.2f}",
+            "Balance due: INR 0.00",
+            "",
+            "We appreciate your business.",
+            "Regards,",
+            self.seller_name.text(),
+        ))
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(str(pdf_path.resolve()))])
+        QApplication.clipboard().setMimeData(mime_data)
+        opened = webbrowser.open(
+            f"https://wa.me/{mobile}?text={quote(message)}"
+        )
+        if opened:
+            QMessageBox.information(
+                self,
+                "Attach Paid Invoice",
+                f"The completed invoice PDF is copied. Paste it into the WhatsApp chat (Ctrl+V):\n\n{pdf_path.name}",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "WhatsApp Could Not Be Opened",
+                f"Open WhatsApp and paste the completed invoice PDF (Ctrl+V):\n{pdf_path.name}",
+            )
+
+
+    def refresh_invoice_payments(self):
+
+        if not hasattr(self, "invoice_payments_table"):
+            return
+
+        self.invoice_payments_table.setRowCount(0)
+        if document_kind_for_selection(self.document_kind.currentIndex()) != "INVOICE":
+            self.record_payment_button.setEnabled(False)
+            self.invoice_payment_summary.setText(
+                "Payments are recorded against invoices, not quotations."
+            )
+            self.refresh_payment_request()
+            return
+
+        try:
+            invoice_no = int(self.invoice_no.text())
+        except ValueError:
+            self.record_payment_button.setEnabled(False)
+            self.invoice_payment_summary.setText(
+                "Save the invoice before recording payments."
+            )
+            self.refresh_payment_request()
+            return
+
+        with sqlite3.connect(DB_PATH) as con:
+            invoice = con.execute(
+                "SELECT grand_total FROM invoices "
+                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                (invoice_no,),
+            ).fetchone()
+            payments = con.execute(
+                """
+                SELECT id, paid_on, amount, method, reference
+                FROM invoice_payments
+                WHERE document_kind = 'INVOICE' AND invoice_no = ?
+                ORDER BY paid_on, id
+                """,
+                (invoice_no,),
             ).fetchall()
 
-        self.invoice_history.blockSignals(True)
-        self.invoice_history.clear()
-        for invoice_no, invoice_date, customer_name, total, document_kind in invoices:
-            buyer = customer_name or "Unnamed buyer"
-            item = QListWidgetItem(
-                f"{document_kind.title()} {invoice_no}   {buyer}   ·   {invoice_date}   ·   "
-                f"₹{(total or 0):,.2f}"
+        if not invoice:
+            self.record_payment_button.setEnabled(False)
+            self.invoice_payment_summary.setText(
+                "Save the invoice before recording payments."
             )
-            item.setData(Qt.ItemDataRole.UserRole, invoice_no)
-            item.setData(Qt.ItemDataRole.UserRole + 1, document_kind)
-            self.invoice_history.addItem(item)
-        self.invoice_history.blockSignals(False)
+            self.refresh_payment_request()
+            return
 
-
-    def load_history_invoice(self, item):
-
-        invoice_no = item.data(Qt.ItemDataRole.UserRole)
-        if invoice_no is not None:
-            document_kind = item.data(Qt.ItemDataRole.UserRole + 1)
-            self.document_kind.setCurrentIndex(
-                document_kind_selection_for_kind(document_kind)
+        grand_total = money(invoice[0] or 0)
+        paid_total = money(
+            sum((Decimal(str(payment[2])) for payment in payments), Decimal("0"))
+        )
+        balance_due = max(Decimal("0.00"), money(grand_total - paid_total))
+        for row, (payment_id, paid_on, amount, method, reference) in enumerate(payments):
+            self.invoice_payments_table.insertRow(row)
+            date_text = QDate.fromString(paid_on, "yyyy-MM-dd").toString("dd/MM/yyyy")
+            for column, value in enumerate((
+                date_text or paid_on,
+                f"₹{money(amount):,.2f}",
+                method,
+                reference,
+            )):
+                self.invoice_payments_table.setItem(
+                    row, column, QTableWidgetItem(str(value))
+                )
+            self.invoice_payments_table.item(row, 0).setData(
+                Qt.ItemDataRole.UserRole, payment_id
             )
-            self.invoice_no.setText(str(invoice_no))
-            self.load_invoice()
+
+        self.invoice_payment_summary.setText(
+            f"Received: ₹{paid_total:,.2f}    Balance due: ₹{balance_due:,.2f}"
+        )
+        self.record_payment_button.setEnabled(balance_due > 0)
+        self.update_invoice_payment_actions()
+        self.refresh_payment_request()
+
+
+    def refresh_payment_request(self):
+
+        if not hasattr(self, "payment_request_amount"):
+            return
+
+        total = self.calculate()[3] if hasattr(self, "items") else Decimal("0.00")
+        paid_total = Decimal("0.00")
+        if (
+            document_kind_for_selection(self.document_kind.currentIndex()) == "INVOICE"
+            and self.invoice_no.text().strip().isdigit()
+        ):
+            paid_total = self.invoice_paid_total(int(self.invoice_no.text()))
+
+        balance_due = max(Decimal("0.00"), money(total - paid_total))
+        if total > 0 and balance_due == 0 and self.payment_percent.value() != 0:
+            self.payment_percent.setValue(0)
+        requested_amount = min(
+            money(total * Decimal(str(self.payment_percent.value())) / 100),
+            balance_due,
+        )
+        remaining_percent = (
+            balance_due / total * 100 if total > 0 else Decimal("0")
+        )
+        self.payment_request_amount.setText(f"₹{requested_amount:,.2f}")
+        self.remaining_percent_label.setText(
+            f"Balance remaining: {remaining_percent:.2f}%"
+        )
+        current_amount = money(self.receipt_amount.value())
+        if (
+            not self._receipt_amount_manual_override
+            or current_amount == self._auto_receipt_amount
+        ):
+            self._updating_receipt_amount = True
+            self.receipt_amount.setValue(float(requested_amount))
+            self._updating_receipt_amount = False
+            self._auto_receipt_amount = requested_amount
+
+
+    def track_receipt_amount_override(self, value):
+
+        if self._updating_receipt_amount:
+            return
+        if money(value) != self._auto_receipt_amount:
+            self._receipt_amount_manual_override = True
+
+
+    def reset_receipt_amount_autofill(self):
+
+        self._receipt_amount_manual_override = False
+        self._auto_receipt_amount = Decimal("0.00")
+        self._updating_receipt_amount = True
+        self.receipt_amount.setValue(0)
+        self._updating_receipt_amount = False
+
+
+    def invoice_paid_total(self, invoice_no):
+
+        with sqlite3.connect(DB_PATH) as con:
+            paid_total = con.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0)
+                FROM invoice_payments
+                WHERE document_kind = 'INVOICE' AND invoice_no = ?
+                """,
+                (invoice_no,),
+            ).fetchone()[0]
+        return money(paid_total)
+
+
+    def update_invoice_payment_actions(self):
+
+        has_selection = self.invoice_payments_table.currentRow() >= 0
+        self.edit_payment_button.setEnabled(has_selection)
+        self.delete_payment_button.setEnabled(has_selection)
+
+
+    def refresh_invoice_after_payment_change(self):
+
+        if not self.save_invoice(show_dialog=False, show_success=False):
+            QMessageBox.warning(
+                self,
+                "Invoice Refresh Failed",
+                "The receipt was changed, but the invoice workbook could not be refreshed.",
+            )
+            return False
+        if not self.export_pdf(show_dialog=False):
+            QMessageBox.warning(
+                self,
+                "PDF Refresh Failed",
+                "The receipt was changed, but the invoice PDF could not be refreshed.",
+            )
+            return False
+        if not self.sync_latest_invoice_request_pdf(int(self.invoice_no.text())):
+            QMessageBox.warning(
+                self,
+                "Request PDF Refresh Failed",
+                "The invoice PDF was updated, but the latest request history PDF could not be refreshed.",
+            )
+        self.remove_moved_private_files()
+        self.refresh_invoice_payments()
+        self.refresh_invoice_history()
+        self.refresh_pending_invoices()
+        return True
+
+
+    def sync_latest_invoice_request_pdf(self, invoice_no):
+
+        with sqlite3.connect(DB_PATH) as con:
+            row = con.execute(
+                """
+                SELECT i.pdf_path, i.grand_total,
+                       COALESCE(SUM(p.amount), 0), r.id, r.pdf_path
+                FROM invoices AS i
+                JOIN invoice_requests AS r ON r.invoice_no = i.invoice_no
+                LEFT JOIN invoice_payments AS p
+                  ON p.invoice_no = i.invoice_no
+                 AND p.document_kind = i.document_kind
+                WHERE i.invoice_no = ? AND i.document_kind = 'INVOICE'
+                GROUP BY i.id, r.id
+                ORDER BY r.requested_at DESC, r.id DESC
+                LIMIT 1
+                """,
+                (invoice_no,),
+            ).fetchone()
+        if not row or not row[0] or not row[4]:
+            return True
+        source = Path(row[0])
+        original_request_pdf = Path(row[4])
+        if not source.is_file():
+            return False
+        invoice_total = money(row[1] or 0)
+        paid_total = money(row[2] or 0)
+        fully_paid = invoice_total > 0 and paid_total >= invoice_total
+        request_folder = original_request_pdf.parent
+        payment_update_path = request_folder / (
+            f"{original_request_pdf.stem}_PAYMENT_STATUS.pdf"
+        )
+        final_pdf_path = (
+            source.with_name(
+                f"Invoice_{source.stem.removeprefix('INV-')}_Paid.pdf"
+            )
+            if fully_paid else None
+        )
+        try:
+            request_folder.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, payment_update_path)
+            if final_pdf_path:
+                shutil.copy2(source, final_pdf_path)
+        except OSError:
+            return False
+        with sqlite3.connect(DB_PATH) as con:
+            con.execute(
+                """
+                UPDATE invoice_requests
+                SET payment_update_path = ?, final_pdf_path = ?
+                WHERE id = ?
+                """,
+                (
+                    str(payment_update_path),
+                    str(final_pdf_path or ""),
+                    row[3],
+                ),
+            )
+        return True
+
+
+    def edit_selected_invoice_payment(self):
+
+        row = self.invoice_payments_table.currentRow()
+        if row < 0:
+            return
+        payment_id = self.invoice_payments_table.item(row, 0).data(
+            Qt.ItemDataRole.UserRole
+        )
+        with sqlite3.connect(DB_PATH) as con:
+            payment = con.execute(
+                "SELECT paid_on, amount, method, reference "
+                "FROM invoice_payments WHERE id = ? AND invoice_no = ?",
+                (payment_id, int(self.invoice_no.text())),
+            ).fetchone()
+        if not payment:
+            self.refresh_invoice_payments()
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Receipt")
+        form = QFormLayout(dialog)
+        amount_field = NoWheelDoubleSpinBox()
+        amount_field.setRange(0.01, 999999999.99)
+        amount_field.setDecimals(2)
+        amount_field.setPrefix("₹ ")
+        amount_field.setValue(float(payment[1]))
+        method_field = NoWheelComboBox()
+        method_field.addItems(["Cash", "UPI", "Bank Transfer", "Cheque", "Other"])
+        method_field.setCurrentText(payment[2])
+        date_field = NoWheelDateEdit(
+            QDate.fromString(payment[0], "yyyy-MM-dd")
+        )
+        date_field.setCalendarPopup(True)
+        date_field.setDisplayFormat("dd/MM/yyyy")
+        reference_field = QLineEdit(payment[3])
+        form.addRow("Amount", amount_field)
+        form.addRow("Method", method_field)
+        form.addRow("Date", date_field)
+        form.addRow("Reference", reference_field)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        new_amount = money(amount_field.value())
+        invoice_no = int(self.invoice_no.text())
+        with sqlite3.connect(DB_PATH) as con:
+            invoice_total = con.execute(
+                "SELECT grand_total FROM invoices "
+                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                (invoice_no,),
+            ).fetchone()[0]
+            others_total = con.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM invoice_payments "
+                "WHERE invoice_no = ? AND id != ?",
+                (invoice_no, payment_id),
+            ).fetchone()[0]
+        allowed_amount = money(
+            Decimal(str(invoice_total or 0)) - Decimal(str(others_total))
+        )
+        if new_amount > allowed_amount:
+            QMessageBox.warning(
+                self,
+                "Payment Exceeds Balance",
+                f"This receipt cannot exceed ₹{allowed_amount:,.2f}.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Confirm Receipt Edit",
+            "Apply these changes to the saved receipt?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        with sqlite3.connect(DB_PATH) as con:
+            con.execute(
+                """
+                UPDATE invoice_payments
+                SET paid_on = ?, amount = ?, method = ?, reference = ?
+                WHERE id = ? AND invoice_no = ?
+                """,
+                (
+                    date_field.date().toString("yyyy-MM-dd"),
+                    float(new_amount),
+                    method_field.currentText(),
+                    reference_field.text().strip(),
+                    payment_id,
+                    invoice_no,
+                ),
+            )
+        self.refresh_invoice_after_payment_change()
+
+
+    def delete_selected_invoice_payment(self):
+
+        row = self.invoice_payments_table.currentRow()
+        if row < 0:
+            return
+        item = self.invoice_payments_table.item(row, 0)
+        payment_id = item.data(Qt.ItemDataRole.UserRole)
+        answer = QMessageBox.question(
+            self,
+            "Delete Receipt",
+            "Delete this payment receipt? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        confirmation = QMessageBox.question(
+            self,
+            "Confirm Permanent Deletion",
+            "Confirm again to permanently delete this receipt.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmation != QMessageBox.StandardButton.Yes:
+            return
+        with sqlite3.connect(DB_PATH) as con:
+            con.execute(
+                "DELETE FROM invoice_payments WHERE id = ? AND invoice_no = ?",
+                (payment_id, int(self.invoice_no.text())),
+            )
+        self.refresh_invoice_after_payment_change()
+
+
+    def record_invoice_payment(self):
+
+        if document_kind_for_selection(self.document_kind.currentIndex()) != "INVOICE":
+            return
+
+        if not self.save_invoice(show_dialog=False, show_success=False):
+            QMessageBox.warning(
+                self,
+                "Invoice Not Saved",
+                "Save a valid invoice before recording a payment.",
+            )
+            return
+
+        invoice_no = int(self.invoice_no.text())
+        amount = money(self.receipt_amount.value())
+        if amount <= 0:
+            QMessageBox.warning(
+                self, "Invalid Payment", "Enter an amount greater than zero."
+            )
+            return
+
+        with sqlite3.connect(DB_PATH) as con:
+            invoice = con.execute(
+                "SELECT grand_total FROM invoices "
+                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                (invoice_no,),
+            ).fetchone()
+            paid_total = con.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0)
+                FROM invoice_payments
+                WHERE document_kind = 'INVOICE' AND invoice_no = ?
+                """,
+                (invoice_no,),
+            ).fetchone()[0]
+            balance_due = money(Decimal(str(invoice[0] or 0)) - Decimal(str(paid_total)))
+            if amount > balance_due:
+                QMessageBox.warning(
+                    self,
+                    "Payment Exceeds Balance",
+                    f"The balance due is ₹{balance_due:,.2f}.",
+                )
+                return
+
+            con.execute(
+                """
+                INSERT INTO invoice_payments (
+                    document_kind, invoice_no, paid_on, amount, method, reference
+                ) VALUES ('INVOICE', ?, ?, ?, ?, ?)
+                """,
+                (
+                    invoice_no,
+                    self.receipt_date.date().toString("yyyy-MM-dd"),
+                    float(amount),
+                    self.receipt_method.currentText(),
+                    self.receipt_reference.text().strip(),
+                ),
+            )
+
+        if not self.save_invoice(show_dialog=False, show_success=False):
+            self.refresh_invoice_payments()
+            QMessageBox.warning(
+                self,
+                "Payment Recorded",
+                "The payment was recorded, but the invoice workbook could not be refreshed.",
+            )
+            return
+        if not self.export_pdf(show_dialog=False):
+            self.refresh_invoice_payments()
+            QMessageBox.warning(
+                self,
+                "Payment Recorded",
+                "The payment and workbook were saved, but the PDF could not be refreshed.",
+            )
+            return
+        if not self.sync_latest_invoice_request_pdf(invoice_no):
+            QMessageBox.warning(
+                self,
+                "Request PDF Refresh Failed",
+                "The invoice PDF was updated, but the latest request history PDF could not be refreshed.",
+            )
+
+        self.reset_receipt_amount_autofill()
+        self.receipt_date.setDate(QDate.currentDate())
+        self.receipt_reference.clear()
+        self.refresh_invoice_payments()
+        self.refresh_invoice_request_history()
+        self.remove_moved_private_files()
+        QMessageBox.information(
+            self,
+            "Payment Recorded",
+            f"₹{amount:,.2f} received by {self.receipt_method.currentText()}.",
+        )
 
 
     def document_kind_changed(self, index):
@@ -2205,15 +3500,17 @@ class InvoiceApp(QMainWindow):
         self.private_invoice_checkbox.setVisible(is_invoice_selection)
         if not is_invoice_selection:
             self.private_invoice_checkbox.setChecked(False)
-        self.payment_box.setTitle(
-            "Invoice Payment" if is_invoice_selection else "Quotation Payment"
-        )
-        self.payment_box.setVisible(is_invoice_selection)
+        self.invoice_payments_box.setVisible(is_invoice_selection)
         self.bank_box.setVisible(is_invoice_selection)
+        self.invoice_request_history_box.setVisible(is_invoice_selection)
+        self.confirm_order_button.setVisible(not is_invoice_selection)
+        self.attach_invoice_checkbox.setVisible(is_invoice_selection)
         self.whatsapp_button.setText(
             "WhatsApp Invoice" if is_invoice_selection else "WhatsApp Quotation"
         )
         self.whatsapp_button.setVisible(True)
+        self.refresh_invoice_payments()
+        self.refresh_invoice_request_history()
 
 
     def choose_save_folder(self):
@@ -2237,6 +3534,15 @@ class InvoiceApp(QMainWindow):
             self.document_kind.currentIndex()
         )
         is_invoice = document_kind == "INVOICE"
+        invoice_total = self.calculate()[3] if is_invoice else Decimal("0.00")
+        paid_total = self.invoice_paid_total(int(self.invoice_no.text())) if is_invoice and self.invoice_no.text().isdigit() else Decimal("0.00")
+        balance_due = max(Decimal("0.00"), money(invoice_total - paid_total))
+        request_percent = self.payment_percent.value() if is_invoice else 0
+        request_amount = min(
+            money(invoice_total * Decimal(str(request_percent)) / 100),
+            balance_due,
+        )
+        attach_invoice = is_invoice and self.attach_invoice_checkbox.isChecked()
         mobile = re.sub(r"\D", "", self.customer_mobile.text())
         if len(mobile) == 10:
             mobile = "91" + mobile
@@ -2255,13 +3561,6 @@ class InvoiceApp(QMainWindow):
                 f"Enter a valid {document_name.lower()} number before sharing.",
             )
             return
-        if is_invoice and not self.bank_upi_id.text().strip():
-            QMessageBox.warning(
-                self,
-                "Payment QR Required",
-                "Select a bank profile with a UPI ID before sharing the invoice scanner.",
-            )
-            return
         if not self.save_document_bundle(show_dialog=False):
             QMessageBox.warning(
                 self,
@@ -2269,6 +3568,15 @@ class InvoiceApp(QMainWindow):
                 f"Save the {document_name.lower()} and PDF before opening WhatsApp.",
             )
             return
+        if is_invoice and self.payment_percent.value() != request_percent:
+            self.payment_percent.setValue(request_percent)
+            if not self.save_document_bundle(show_dialog=False):
+                QMessageBox.warning(
+                    self,
+                    f"{document_name} Not Sent",
+                    "The selected payment request could not be saved to the invoice PDF.",
+                )
+                return
         with sqlite3.connect(DB_PATH) as con:
             row = con.execute(
                 """SELECT pdf_path FROM invoices
@@ -2286,8 +3594,12 @@ class InvoiceApp(QMainWindow):
                 "Save the document PDF before attaching it in WhatsApp.",
             )
             return
-        attachment_paths = [Path(pdf_path).resolve()]
-        if is_invoice:
+        attachment_paths = (
+            [Path(pdf_path).resolve()]
+            if not is_invoice or attach_invoice else []
+        )
+        qr_path = None
+        if is_invoice and balance_due > 0 and self.bank_upi_id.text().strip():
             qr_path = self.quotation_payment_qr_path(
                 invoice_no, self.invoice_date.date().toPython()
             )
@@ -2299,6 +3611,45 @@ class InvoiceApp(QMainWindow):
                 )
                 return
             attachment_paths.append(qr_path.resolve())
+
+        if is_invoice:
+            request_time = datetime.now()
+            timestamp = request_time.strftime("%Y%m%d_%H%M%S_%f")
+            request_folder = Path(pdf_path).parent / "Requests"
+            request_folder.mkdir(parents=True, exist_ok=True)
+            snapshot_pdf_path = request_folder / (
+                f"{Path(pdf_path).stem}_REQUEST_{timestamp}.pdf"
+            )
+            shutil.copy2(pdf_path, snapshot_pdf_path)
+            snapshot_qr_path = None
+            if qr_path and qr_path.is_file():
+                snapshot_qr_path = request_folder / (
+                    f"{Path(pdf_path).stem}_REQUEST_{timestamp}_QR.png"
+                )
+                shutil.copy2(qr_path, snapshot_qr_path)
+            with sqlite3.connect(DB_PATH) as con:
+                con.execute(
+                    """
+                    INSERT INTO invoice_requests (
+                        invoice_no, requested_at, request_percent, request_amount,
+                        pdf_path, qr_path
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        invoice_no,
+                        request_time.isoformat(timespec="microseconds"),
+                        request_percent,
+                        float(request_amount),
+                        str(snapshot_pdf_path),
+                        str(snapshot_qr_path or ""),
+                    ),
+                )
+            attachment_paths = (
+                [snapshot_pdf_path.resolve()] if attach_invoice else []
+            )
+            if snapshot_qr_path:
+                attachment_paths.append(snapshot_qr_path.resolve())
+            self.refresh_invoice_request_history()
 
         pdf_mime_data = QMimeData()
         pdf_mime_data.setUrls(
@@ -2315,23 +3666,18 @@ class InvoiceApp(QMainWindow):
                 f"Regards,\n{self.seller_name.text()}"
             )
         else:
-            _, _, _, total = self.calculate()
-            payment_percent = self.payment_percent.value()
-            amount = money(total * Decimal(str(payment_percent)) / 100)
             message_lines = [
                 f"Hello {greeting},",
                 self.seller_name.text(),
                 "",
+                f"Invoice total: INR {invoice_total:.2f}",
+                f"Payment request ({request_percent:g}%): INR {request_amount:.2f}",
+                f"Received: INR {paid_total:.2f}",
             ]
-            if payment_percent >= 100:
-                message_lines.append(f"Total Amount (100%): INR {total:.2f}")
+            if balance_due > 0:
+                message_lines.append(f"Balance due: INR {balance_due:.2f}")
             else:
-                remaining = money(total - amount)
-                message_lines.extend((
-                    f"Total Amount: INR {total:.2f}",
-                    f"Advance ({payment_percent:g}%): INR {amount:.2f}",
-                    f"Remaining: INR {remaining:.2f}",
-                ))
+                message_lines.append("Payment complete")
             message = "\n".join(message_lines)
         opened = webbrowser.open(
             f"https://wa.me/{mobile}?text={quote(message)}"
@@ -2445,6 +3791,7 @@ class InvoiceApp(QMainWindow):
         self.delete_document_draft(document_kind)
         self.loaded_invoice_no = None
         self.custom_output_dir = None
+        self.reset_receipt_amount_autofill()
         self.private_invoice_checkbox.setChecked(False)
 
         self.invoice_no.setText(
@@ -2481,10 +3828,13 @@ class InvoiceApp(QMainWindow):
         self.items.setRowCount(0)
         self.invoice_type.setCurrentIndex(0)
         self.gst_rate.setValue(5)
-        self.payment_percent.setValue(100)
+        self.payment_percent.setValue(50)
 
 
         self.refresh()
+        self.refresh_invoice_payments()
+        self.refresh_invoice_request_history()
+        self.invoice_scroll_area.verticalScrollBar().setValue(0)
 
 
         self.statusBar().showMessage(
@@ -2738,6 +4088,7 @@ class InvoiceApp(QMainWindow):
             f"₹{total:.2f}"
 
         )
+        self.refresh_payment_request()
 
         self.amount_words.setText(amount_to_words(total))
         self.tax_words.setText(amount_to_words(gst))
@@ -2795,6 +4146,12 @@ class InvoiceApp(QMainWindow):
 
         workbook = load_workbook(DATA_DIR / "C GST.xlsx")
         sheet = workbook.active
+        paid_total = (
+            self.invoice_paid_total(invoice_no)
+            if document_kind == "INVOICE" else Decimal("0.00")
+        )
+        balance_due = max(Decimal("0.00"), money(total - paid_total))
+        received_percent = float(paid_total / total * 100) if total else 0
         authorised_signatory = sheet["F50"].value or "Authorised Signatory"
         for row in sheet.iter_rows():
             for cell in row:
@@ -2978,18 +4335,10 @@ class InvoiceApp(QMainWindow):
                 "D44": f"Bank Name: {self.bank_name.text()}",
                 "D45": f"A/C No: {self.bank_account.text()}",
                 "D46": f"IFSC: {self.bank_ifsc.text()}",
-                "G43": "UPI PAYMENT",
-                "H44": (
-                    f"Advance {self.payment_percent.value():g}%: INR "
-                    f"{money(total * Decimal(str(self.payment_percent.value())) / 100):.2f}"
-                    if self.payment_percent.value() < 100
-                    else f"Total Amount (100%): INR {total:.2f}"
-                ),
-                "H45": (
-                    "Scan QR to prefill amount"
-                    if self.bank_upi_id.text().strip() else ""
-                ),
-                "H46": "WhatsApp: +91 6382208004",
+                "G43": "PAYMENT SUMMARY",
+                "H44": f"Payment received: {received_percent:g}%",
+                "H45": f"Received: INR {paid_total:.2f}",
+                "H46": f"Balance due: INR {balance_due:.2f}",
                 "A47": "Declaration",
                 "A48": self.declaration.toPlainText().strip(),
                 "F47": self.seller_signatory.text(),
@@ -3342,12 +4691,14 @@ class InvoiceApp(QMainWindow):
             )
             sheet.add_image(signature)
 
-        if document_kind == "INVOICE" and self.bank_upi_id.text().strip():
-            payment_amount = money(
-                total * Decimal(str(self.payment_percent.value())) / 100
+        if (
+            document_kind == "INVOICE"
+            and self.bank_upi_id.text().strip()
+        ):
+            payment_uri = self.payment_uri(invoice_no)
+            qr_path = self.quotation_payment_qr_path(
+                invoice_no, invoice_date, total
             )
-            payment_uri = self.payment_uri(invoice_no, payment_amount)
-            qr_path = self.quotation_payment_qr_path(invoice_no, invoice_date)
             qr_path.parent.mkdir(parents=True, exist_ok=True)
             qrcode.make(payment_uri).save(qr_path)
             payment_qr = SpreadsheetImage(str(qr_path))
@@ -3495,13 +4846,8 @@ class InvoiceApp(QMainWindow):
                 self.document_kind.currentIndex()
             )
             scanner_path = None
-            document_root = (
-                self.custom_output_dir
-                or (
-                    PRIVATE_INVOICE_DIR
-                    if self.private_invoice_checkbox.isChecked()
-                    else INVOICE_DIR
-                )
+            document_root = self.invoice_storage_root(
+                document_kind, invoice_no, total
             )
             document_folder = document_folder_for_selection(
                 self.document_kind.currentIndex()
@@ -3518,6 +4864,19 @@ class InvoiceApp(QMainWindow):
                     "FROM invoices WHERE invoice_no = ? AND document_kind = ?",
                     (invoice_no, document_kind),
                 ).fetchone()
+            paid_total = (
+                self.invoice_paid_total(invoice_no)
+                if document_kind == "INVOICE" else Decimal("0.00")
+            )
+            if paid_total > money(total):
+                if show_dialog:
+                    QMessageBox.warning(
+                        self,
+                        "Invoice Total Below Amount Received",
+                        f"The recorded payments total ₹{paid_total:,.2f}, which is "
+                        f"more than the new invoice total of ₹{money(total):,.2f}.",
+                    )
+                return False
             if existing_invoice and existing_invoice[0]:
                 previous_xlsx = Path(existing_invoice[0])
                 was_private = previous_xlsx.resolve().is_relative_to(
@@ -3557,6 +4916,46 @@ class InvoiceApp(QMainWindow):
                             )
                         )
                         self.pending_private_move_paths.append(private_qr_path)
+            if existing_invoice and existing_invoice[0]:
+                previous_xlsx = Path(existing_invoice[0])
+                previous_pdf = Path(existing_invoice[1]) if existing_invoice[1] else None
+                target_pdf = (
+                    document_root / document_folder / "PDF" / str(invoice_date.year)
+                    / f"{output.stem}.pdf"
+                )
+                cleanup_paths = (previous_xlsx, previous_pdf)
+                for old_path in cleanup_paths:
+                    if (
+                        old_path
+                        and old_path.resolve() not in {
+                            output.resolve(), target_pdf.resolve()
+                        }
+                        and old_path not in self.pending_private_move_paths
+                    ):
+                        self.pending_private_move_paths.append(old_path)
+                if previous_xlsx.parent.parent.name == "XLSX":
+                    previous_root = previous_xlsx.parent.parent.parent
+                    old_qr = (
+                        previous_root / "QR" / str(invoice_date.year)
+                        / invoice_filename(
+                            invoice_no,
+                            existing_invoice[2],
+                            "_payment.png",
+                            document_kind,
+                        )
+                    )
+                    new_qr = (
+                        document_root / document_folder / "QR"
+                        / str(invoice_date.year)
+                        / invoice_filename(
+                            invoice_no,
+                            self.customer_name.text(),
+                            "_payment.png",
+                            document_kind,
+                        )
+                    )
+                    if old_qr.resolve() != new_qr.resolve():
+                        self.pending_private_move_paths.append(old_qr)
             if output.exists() and not existing_invoice:
                 if show_dialog:
                     QMessageBox.warning(
@@ -3608,6 +5007,9 @@ class InvoiceApp(QMainWindow):
             self.loaded_invoice_no = invoice_no
             self.save_document_draft(document_kind)
             self.refresh_invoice_history()
+            self.refresh_pending_invoices()
+            self.refresh_quotation_register()
+            self.refresh_invoice_payments()
             self.statusBar().showMessage(f"{document_kind.title()} saved: {output}")
             if show_dialog and show_success:
                 QMessageBox.information(
