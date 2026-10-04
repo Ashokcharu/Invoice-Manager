@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QMessageBox,
+    QCompleter,
+    QToolTip,
     QDateEdit,
     QHeaderView,
     QGroupBox,
@@ -261,37 +263,73 @@ class FinanceMonthlyChart(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.values = [0.0] * 12
-        self.setMinimumHeight(250)
+        self.collected_values = [0.0] * 12
+        self.outstanding_values = [0.0] * 12
+        self.setMinimumHeight(270)
+        self.setMouseTracking(True)
 
-    def set_values(self, values):
-        self.values = list(values[:12]) + [0.0] * max(0, 12 - len(values))
+    def set_values(self, collected, outstanding):
+        self.collected_values = list(collected[:12]) + [0.0] * max(0, 12 - len(collected))
+        self.outstanding_values = list(outstanding[:12]) + [0.0] * max(0, 12 - len(outstanding))
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        left, right, top, bottom = 42, 16, 16, 34
+        left, right, top, bottom = 48, 12, 34, 34
         chart = self.rect().adjusted(left, top, -right, -bottom)
-        max_value = max(self.values, default=0)
+        max_value = max(
+            max(self.collected_values, default=0),
+            max(self.outstanding_values, default=0),
+        )
         max_value = max_value or 1
         painter.setPen(QPen(QColor("#dce4e9"), 1))
         for fraction in (0, 0.5, 1):
             y = chart.bottom() - chart.height() * fraction
             painter.drawLine(chart.left(), round(y), chart.right(), round(y))
-        slot = chart.width() / 12
-        bar_width = max(7, slot * 0.54)
-        for index, value in enumerate(self.values):
-            bar_height = chart.height() * value / max_value
-            bar = QRectF(
-                chart.left() + slot * index + (slot - bar_width) / 2,
-                chart.bottom() - bar_height,
-                bar_width,
-                bar_height,
+            value = max_value * fraction
+            label = f"{value / 1000:.0f}k" if value >= 1000 else f"{value:.0f}"
+            painter.setPen(QColor("#74828a"))
+            painter.setFont(QFont("Segoe UI", 7))
+            painter.drawText(
+                QRectF(0, y - 8, left - 7, 16),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                label,
             )
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#21866b" if value else "#e3e9ed"))
-            painter.drawRoundedRect(bar, 3, 3)
+            painter.setPen(QPen(QColor("#dce4e9"), 1))
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#21866b"))
+        painter.drawRoundedRect(QRectF(chart.left(), 8, 9, 9), 2, 2)
+        painter.setPen(QColor("#52646d"))
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.drawText(QRectF(chart.left() + 13, 3, 92, 20), "Collected")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#e7a34d"))
+        painter.drawRoundedRect(QRectF(chart.left() + 100, 8, 9, 9), 2, 2)
+        painter.setPen(QColor("#52646d"))
+        painter.drawText(QRectF(chart.left() + 113, 3, 110, 20), "Outstanding")
+
+        slot = chart.width() / 12
+        bar_width = max(3, min(15, slot * 0.29))
+        for index, (collected, outstanding) in enumerate(zip(
+            self.collected_values, self.outstanding_values
+        )):
+            for offset, value, color in (
+                (-bar_width / 2 - 1, collected, "#21866b"),
+                (bar_width / 2 + 1, outstanding, "#e7a34d"),
+            ):
+                bar_height = chart.height() * value / max_value
+                bar = QRectF(
+                    chart.left() + slot * index + slot / 2 + offset,
+                    chart.bottom() - bar_height,
+                    bar_width,
+                    bar_height,
+                )
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(color if value else "#e3e9ed"))
+                painter.drawRoundedRect(bar, 2, 2)
+
             painter.setPen(QColor("#667783"))
             painter.setFont(QFont("Segoe UI", 8))
             painter.drawText(
@@ -299,6 +337,28 @@ class FinanceMonthlyChart(QWidget):
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                 self.MONTHS[index],
             )
+
+    def mouseMoveEvent(self, event):
+        chart = self.rect().adjusted(48, 34, -12, -34)
+        position = event.position().toPoint()
+        if not chart.contains(position):
+            QToolTip.hideText()
+            return
+
+        slot = chart.width() / 12
+        month_index = min(11, int((position.x() - chart.left()) / slot))
+        collected = self.collected_values[month_index]
+        outstanding = self.outstanding_values[month_index]
+        details = [
+            f"{self.MONTHS[month_index]}",
+            f"Collected to date on invoices issued: ₹{collected:,.2f}",
+            f"Outstanding on invoices issued: ₹{outstanding:,.2f}",
+        ]
+        if month_index and self.collected_values[month_index - 1] > 0:
+            previous = self.collected_values[month_index - 1]
+            growth = (collected - previous) / previous * 100
+            details.append(f"Collected-to-date change vs prior invoice month: {growth:+.1f}%")
+        QToolTip.showText(event.globalPosition().toPoint(), "\n".join(details), self)
 
 
 # ============================================================
@@ -931,7 +991,7 @@ class InvoiceApp(QMainWindow):
             QMessageBox.warning(self, "Buyer Name Required", "Enter a buyer name first.")
             return
         mobile = self.customer_mobile.text().strip()
-        if not normalize_indian_mobile(mobile):
+        if mobile and not normalize_indian_mobile(mobile):
             QMessageBox.warning(
                 self,
                 "Invalid Buyer Mobile",
@@ -1423,6 +1483,14 @@ class InvoiceApp(QMainWindow):
             painter.setPen(QPen(QColor("#21866b"), 2.2))
             painter.drawLine(18, 15, 18, 22)
             painter.drawLine(14.5, 18.5, 21.5, 18.5)
+        elif kind == "finance":
+            painter.setPen(QColor("#21866b"))
+            painter.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+            painter.drawText(
+                QRectF(3, 1, 18, 22),
+                Qt.AlignmentFlag.AlignCenter,
+                "₹",
+            )
         else:
             painter.setPen(QColor("#21866b"))
             painter.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
@@ -1461,7 +1529,7 @@ class InvoiceApp(QMainWindow):
             ("Create", self.sidebar_action_icon("plus")),
             ("invoices", self.sidebar_action_icon("create")),
             ("Quotations", self.sidebar_action_icon("quotation")),
-            ("Finance", self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)),
+            ("Finance", self.sidebar_action_icon("finance")),
         )
         for label, icon in navigation_items:
             item = QListWidgetItem(icon, label)
@@ -1592,11 +1660,14 @@ class InvoiceApp(QMainWindow):
         layout.addLayout(metrics)
 
         charts = QHBoxLayout()
-        trend_box = QGroupBox("Monthly receipts")
+        trend_box = QGroupBox("Monthly collected vs outstanding")
         trend_layout = QVBoxLayout(trend_box)
         self.finance_monthly_chart = FinanceMonthlyChart()
         trend_layout.addWidget(self.finance_monthly_chart)
-        self.finance_monthly_insight = QLabel("Receipts recorded in the selected year")
+        self.finance_monthly_insight = QLabel(
+            "Collected-to-date and outstanding amounts are grouped by invoice month."
+        )
+        self.finance_monthly_insight.setWordWrap(True)
         self.finance_monthly_insight.setStyleSheet("color: #657780;")
         trend_layout.addWidget(self.finance_monthly_insight)
         charts.addWidget(trend_box, 2)
@@ -1643,7 +1714,7 @@ class InvoiceApp(QMainWindow):
         self.finance_year_insight = QLabel("Year-on-year comparison will appear here.")
         self.finance_year_insight.setWordWrap(True)
         self.finance_year_insight.setStyleSheet("color: #657780;")
-        self.finance_top_month_insight = QLabel("Best collection month: --")
+        self.finance_top_month_insight = QLabel("Most collected invoice month: --")
         self.finance_top_month_insight.setWordWrap(True)
         insights_layout.addWidget(self.finance_overdue_label)
         insights_layout.addWidget(self.finance_year_insight)
@@ -1739,6 +1810,7 @@ class InvoiceApp(QMainWindow):
             if invoice_date and invoice_date.startswith(year_text)
         )
         monthly_receipts = [0.0] * 12
+        monthly_outstanding = [0.0] * 12
         yearly_receipts = 0.0
         previous_year_receipts = 0.0
         for paid_on, amount in payment_rows:
@@ -1747,14 +1819,23 @@ class InvoiceApp(QMainWindow):
             payment_year = paid_on[:4]
             if payment_year == year_text:
                 yearly_receipts += float(amount or 0)
-                try:
-                    month_index = int(paid_on[5:7]) - 1
-                except ValueError:
-                    continue
-                if 0 <= month_index < 12:
-                    monthly_receipts[month_index] += float(amount or 0)
             elif payment_year == str(year - 1) and paid_on <= comparison_cutoff:
                 previous_year_receipts += float(amount or 0)
+
+        for _, invoice_date, _, total, paid in invoice_rows:
+            if not invoice_date or not invoice_date.startswith(year_text):
+                continue
+            try:
+                month_index = int(invoice_date[5:7]) - 1
+            except ValueError:
+                continue
+            if 0 <= month_index < 12:
+                invoice_total = max(0.0, float(total or 0))
+                received = max(0.0, float(paid or 0))
+                monthly_receipts[month_index] += min(invoice_total, received)
+                monthly_outstanding[month_index] += max(
+                    0.0, invoice_total - received
+                )
 
         total_collected = 0.0
         total_outstanding = 0.0
@@ -1798,13 +1879,15 @@ class InvoiceApp(QMainWindow):
                 f"Receipts are {growth_prefix}{growth:.1f}% versus {comparison_period}."
             )
         else:
-            self.finance_growth_value.setText("--")
+            self.finance_growth_value.setText("N/A")
             self.finance_growth_detail.setText(f"No {year - 1} receipt history")
             self.finance_year_insight.setText(
                 f"No comparable receipt history for {year - 1}."
             )
 
-        self.finance_monthly_chart.set_values(monthly_receipts)
+        self.finance_monthly_chart.set_values(
+            monthly_receipts, monthly_outstanding
+        )
         nonzero_months = [
             (amount, FinanceMonthlyChart.MONTHS[index])
             for index, amount in enumerate(monthly_receipts)
@@ -1813,23 +1896,41 @@ class InvoiceApp(QMainWindow):
         if nonzero_months:
             best_amount, best_month = max(nonzero_months)
             self.finance_top_month_insight.setText(
-                f"Best collection month: {best_month} · ₹{best_amount:,.2f}"
+                f"Most collected invoice month: {best_month} · ₹{best_amount:,.2f}"
             )
-            latest_index = max(index for index, amount in enumerate(monthly_receipts) if amount > 0)
-            if latest_index > 0 and monthly_receipts[latest_index - 1] > 0:
-                prior = monthly_receipts[latest_index - 1]
-                change = (monthly_receipts[latest_index] - prior) / prior * 100
-                change_prefix = "+" if change >= 0 else ""
-                self.finance_monthly_insight.setText(
-                    f"Latest active month is {change_prefix}{change:.1f}% versus the prior month."
-                )
-            else:
-                self.finance_monthly_insight.setText(
-                    f"Receipts recorded in {year}; strongest month was {best_month}."
-                )
         else:
             self.finance_top_month_insight.setText("Best collection month: --")
-            self.finance_monthly_insight.setText(f"No receipts recorded in {year}.")
+
+        active_months = [
+            index
+            for index, (collected, outstanding) in enumerate(zip(
+                monthly_receipts, monthly_outstanding
+            ))
+            if collected > 0 or outstanding > 0
+        ]
+        if active_months:
+            latest_index = max(active_months)
+            month_name = FinanceMonthlyChart.MONTHS[latest_index]
+            month_summary = (
+                f"{month_name}: collected ₹{monthly_receipts[latest_index]:,.2f}; "
+                f"outstanding ₹{monthly_outstanding[latest_index]:,.2f}"
+            )
+            if latest_index > 0 and monthly_receipts[latest_index - 1] > 0:
+                prior = monthly_receipts[latest_index - 1]
+                change = (
+                    monthly_receipts[latest_index] - prior
+                ) / prior * 100
+                month_summary += (
+                    f"; collected-to-date change {change:+.1f}% "
+                    "vs prior invoice month"
+                )
+            else:
+                month_summary += "; no prior-month receipt comparison"
+            self.finance_monthly_insight.setText(month_summary)
+        else:
+            self.finance_monthly_insight.setText(
+                f"No receipts or outstanding invoices recorded in {year}."
+            )
 
         self.finance_donut_chart.set_values(total_collected, total_outstanding)
         self.finance_mix_collected.setText(f"Collected: ₹{total_collected:,.2f}")
@@ -2396,7 +2497,7 @@ class InvoiceApp(QMainWindow):
         self.download_invoice_request_button.clicked.connect(
             self.download_selected_invoice_request
         )
-        self.send_paid_invoice_button = QPushButton("Send Paid PDF")
+        self.send_paid_invoice_button = QPushButton("Send PDF")
         self.send_paid_invoice_button.clicked.connect(
             self.send_selected_paid_invoice
         )
@@ -2483,6 +2584,17 @@ class InvoiceApp(QMainWindow):
         )
         self.customer_gstin = QLineEdit()
         self.buyer_selector = NoWheelComboBox()
+        self.buyer_selector.setEditable(True)
+        self.buyer_selector.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.buyer_selector.lineEdit().setPlaceholderText(
+            "Search or select a saved buyer"
+        )
+        buyer_completer = QCompleter(
+            self.buyer_selector.model(), self.buyer_selector
+        )
+        buyer_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        buyer_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.buyer_selector.setCompleter(buyer_completer)
         self.buyer_selector.currentIndexChanged.connect(self.load_buyer_profile)
         buyer_profile_row = QHBoxLayout()
         buyer_profile_row.addWidget(self.buyer_selector, 1)
@@ -3369,7 +3481,7 @@ class InvoiceApp(QMainWindow):
                 """
             , (invoice_no,)).fetchall()
             invoice = con.execute(
-                "SELECT grand_total FROM invoices "
+                "SELECT grand_total, pdf_path FROM invoices "
                 "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
                 (invoice_no,),
             ).fetchone()
@@ -3379,31 +3491,37 @@ class InvoiceApp(QMainWindow):
                 (invoice_no,),
             ).fetchone()[0]
 
-        fully_paid = bool(
-            invoice
-            and money(paid_total) >= money(invoice[0] or 0)
-            and money(invoice[0] or 0) > 0
-        )
         received_percent = (
             money(paid_total) / money(invoice[0]) * 100
             if invoice and money(invoice[0] or 0) > 0 else Decimal("0")
         )
 
+        history_rows = list(requests)
+        if invoice and invoice[1] and Path(invoice[1]).is_file():
+            saved_pdf = Path(invoice[1])
+            saved_at = datetime.fromtimestamp(
+                saved_pdf.stat().st_mtime
+            ).isoformat(timespec="seconds")
+            history_rows.append((None, saved_at, None, None, str(saved_pdf), "", ""))
+        history_rows.sort(
+            key=lambda history_row: (
+                history_row[1], history_row[0] or 0
+            ),
+            reverse=True,
+        )
+
         for row, (
             request_id, requested_at, percent, amount, original_pdf_path,
             payment_update_path, final_pdf_path,
-        ) in enumerate(requests):
+        ) in enumerate(history_rows):
             requested_time = datetime.fromisoformat(requested_at)
-            request_status = (
-                "Paid 100%" if fully_paid and row == 0
-                else f"Received {received_percent:g}%" if row == 0 and paid_total > 0
-                else "Earlier request" if row > 0
-                else "Outstanding"
-            )
-            display_pdf_path = final_pdf_path or payment_update_path or original_pdf_path
+            request_status = f"{format(received_percent.normalize(), 'f')}% paid"
+            display_pdf_path = payment_update_path or original_pdf_path
             values = (
                 requested_time.strftime("%d/%m/%Y %H:%M:%S"),
-                f"{percent:g}% · ₹{money(amount):,.2f}",
+                "Saved invoice PDF"
+                if request_id is None
+                else f"{percent:g}% · ₹{money(amount):,.2f}",
                 request_status,
                 Path(display_pdf_path).name,
             )
@@ -3412,9 +3530,12 @@ class InvoiceApp(QMainWindow):
                 item = QTableWidgetItem(value)
                 if column == 0:
                     item.setData(Qt.ItemDataRole.UserRole, request_id)
-                if fully_paid and row == 0 and column == 2:
+                if column == 2 and received_percent >= 100:
                     item.setBackground(QBrush(QColor("#dff2e3")))
                     item.setForeground(QBrush(QColor("#245c37")))
+                elif column == 2 and received_percent > 0:
+                    item.setBackground(QBrush(QColor("#fff0d5")))
+                    item.setForeground(QBrush(QColor("#80521b")))
                 self.invoice_request_history_table.setItem(row, column, item)
         self.update_invoice_request_actions()
 
@@ -3425,11 +3546,7 @@ class InvoiceApp(QMainWindow):
         selected = row >= 0
         self.open_invoice_request_button.setEnabled(selected)
         self.download_invoice_request_button.setEnabled(selected)
-        is_paid_request = (
-            selected
-            and self.invoice_request_history_table.item(row, 2).text() == "Paid 100%"
-        )
-        self.send_paid_invoice_button.setEnabled(is_paid_request)
+        self.send_paid_invoice_button.setEnabled(selected)
 
 
     def selected_invoice_request_path(self):
@@ -3440,11 +3557,20 @@ class InvoiceApp(QMainWindow):
         request_id = self.invoice_request_history_table.item(
             row, 0
         ).data(Qt.ItemDataRole.UserRole)
+        if request_id is None:
+            with sqlite3.connect(DB_PATH) as con:
+                result = con.execute(
+                    "SELECT pdf_path FROM invoices "
+                    "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
+                    (int(self.invoice_no.text()),),
+                ).fetchone()
+            path = Path(result[0]) if result and result[0] else None
+            return path if path and path.is_file() else None
+
         with sqlite3.connect(DB_PATH) as con:
             result = con.execute(
                 """
                 SELECT COALESCE(
-                    NULLIF(final_pdf_path, ''),
                     NULLIF(payment_update_path, ''),
                     pdf_path
                 )
@@ -3510,11 +3636,19 @@ class InvoiceApp(QMainWindow):
                 "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
                 (invoice_no,),
             ).fetchone()[0]
-        if not invoice or money(paid_total) < money(invoice[0] or 0):
+        if not invoice:
             QMessageBox.warning(
-                self, "Invoice Not Fully Paid", "Only a completed invoice can be sent from this action."
+                self, "Invoice Missing", "This invoice could not be found."
             )
             return
+
+        invoice_total = money(invoice[0] or 0)
+        paid_total = money(paid_total)
+        balance_due = max(Decimal("0.00"), invoice_total - paid_total)
+        received_percent = (
+            paid_total / invoice_total * 100
+            if invoice_total > 0 else Decimal("0")
+        )
 
         mobile = normalize_indian_mobile(self.customer_mobile.text())
         if not mobile:
@@ -3529,11 +3663,12 @@ class InvoiceApp(QMainWindow):
             f"Hello {invoice[1] or 'Customer'},",
             "",
             f"Thank you for choosing {self.seller_name.text()} for your garments order.",
-            f"Please find attached the final paid invoice {invoice_no} for your records.",
+            f"Please find attached invoice {invoice_no} for your records.",
             "",
-            f"Invoice total: INR {money(invoice[0]):.2f}",
+            f"Invoice total: INR {invoice_total:.2f}",
             f"Received: INR {money(paid_total):.2f}",
-            "Balance due: INR 0.00",
+            f"Payment status: {format(received_percent.normalize(), 'f')}% paid",
+            f"Balance due: INR {balance_due:.2f}",
             "",
             "We appreciate your business.",
             "Regards,",
@@ -3546,8 +3681,8 @@ class InvoiceApp(QMainWindow):
         if opened:
             QMessageBox.information(
                 self,
-                "Attach Paid Invoice",
-                f"The completed invoice PDF is copied. Paste it into the WhatsApp chat (Ctrl+V):\n\n{pdf_path.name}",
+                "Attach Invoice PDF",
+                f"The invoice PDF is copied. Paste it into the WhatsApp chat (Ctrl+V):\n\n{pdf_path.name}",
             )
         else:
             QMessageBox.warning(
@@ -3726,7 +3861,7 @@ class InvoiceApp(QMainWindow):
                 "The receipt was changed, but the invoice PDF could not be refreshed.",
             )
             return False
-        if not self.sync_latest_invoice_request_pdf(int(self.invoice_no.text())):
+        if not self.sync_invoice_request_pdfs(int(self.invoice_no.text())):
             QMessageBox.warning(
                 self,
                 "Request PDF Refresh Failed",
@@ -3744,7 +3879,7 @@ class InvoiceApp(QMainWindow):
         whatsapp_web_url = QUrl(
             f"https://web.whatsapp.com/send?phone={mobile}&text={quote(message)}"
         )
-        if sys.platform.startswith("linux"):
+        if sys.platform.startswith(("linux", "win")):
             return QDesktopServices.openUrl(whatsapp_web_url)
 
         whatsapp_url = QUrl(
@@ -3755,64 +3890,188 @@ class InvoiceApp(QMainWindow):
         return QDesktopServices.openUrl(whatsapp_web_url)
 
 
-    def sync_latest_invoice_request_pdf(self, invoice_no):
+    def export_xlsx_to_pdf(self, xlsx_path, pdf_path):
+
+        xlsx_path = Path(xlsx_path)
+        pdf_path = Path(pdf_path)
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            powershell = shutil.which("powershell.exe")
+            if not powershell:
+                raise RuntimeError("Windows PowerShell was not found.")
+            workbook_path = str(xlsx_path.resolve()).replace("'", "''")
+            output_path = str(pdf_path.resolve()).replace("'", "''")
+            script = (
+                "$excel = $null; $book = $null; "
+                "try { "
+                "$excel = New-Object -ComObject Excel.Application; "
+                "$excel.Visible = $false; "
+                f"$book = $excel.Workbooks.Open('{workbook_path}'); "
+                f"$book.ExportAsFixedFormat(0, '{output_path}'); "
+                "} finally { "
+                "if ($book) { $book.Close($false) }; "
+                "if ($excel) { $excel.Quit() } "
+                "}"
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True,
+                text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode:
+                raise RuntimeError(result.stderr or result.stdout)
+        else:
+            libreoffice = shutil.which("libreoffice") or shutil.which("soffice")
+            if not libreoffice:
+                raise RuntimeError("LibreOffice is required to refresh request PDFs.")
+            with tempfile.TemporaryDirectory(dir=DATA_DIR) as temp_dir:
+                result = subprocess.run(
+                    [
+                        libreoffice,
+                        "--headless",
+                        "--convert-to", "pdf",
+                        "--outdir", temp_dir,
+                        str(xlsx_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                converted_pdf = Path(temp_dir) / f"{xlsx_path.stem}.pdf"
+                if not converted_pdf.is_file():
+                    raise RuntimeError(result.stderr or result.stdout)
+                shutil.copy2(converted_pdf, pdf_path)
+        if not pdf_path.is_file():
+            raise RuntimeError(f"PDF was not created: {pdf_path}")
+        return True
+
+
+    def sync_invoice_request_pdfs(self, invoice_no):
 
         with sqlite3.connect(DB_PATH) as con:
-            row = con.execute(
+            invoice = con.execute(
                 """
-                SELECT i.pdf_path, i.grand_total,
-                       COALESCE(SUM(p.amount), 0), r.id, r.pdf_path
-                FROM invoices AS i
-                JOIN invoice_requests AS r ON r.invoice_no = i.invoice_no
-                LEFT JOIN invoice_payments AS p
-                  ON p.invoice_no = i.invoice_no
-                 AND p.document_kind = i.document_kind
-                WHERE i.invoice_no = ? AND i.document_kind = 'INVOICE'
-                GROUP BY i.id, r.id
-                ORDER BY r.requested_at DESC, r.id DESC
-                LIMIT 1
+                SELECT xlsx_path, pdf_path, grand_total,
+                    (SELECT COALESCE(SUM(amount), 0) FROM invoice_payments
+                     WHERE document_kind = 'INVOICE' AND invoice_no = invoices.invoice_no)
+                FROM invoices
+                WHERE invoice_no = ? AND document_kind = 'INVOICE'
                 """,
                 (invoice_no,),
             ).fetchone()
-        if not row or not row[0] or not row[4]:
-            return True
-        source = Path(row[0])
-        original_request_pdf = Path(row[4])
-        if not source.is_file():
-            return False
-        invoice_total = money(row[1] or 0)
-        paid_total = money(row[2] or 0)
-        fully_paid = invoice_total > 0 and paid_total >= invoice_total
-        request_folder = original_request_pdf.parent
-        payment_update_path = request_folder / (
-            f"{original_request_pdf.stem}_PAYMENT_STATUS.pdf"
-        )
-        final_pdf_path = (
-            source.with_name(
-                f"Invoice_{source.stem.removeprefix('INV-')}_Paid.pdf"
-            )
-            if fully_paid else None
-        )
-        try:
-            request_folder.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, payment_update_path)
-            if final_pdf_path:
-                shutil.copy2(source, final_pdf_path)
-        except OSError:
-            return False
-        with sqlite3.connect(DB_PATH) as con:
-            con.execute(
+            requests = con.execute(
                 """
-                UPDATE invoice_requests
-                SET payment_update_path = ?, final_pdf_path = ?
-                WHERE id = ?
+                SELECT id, request_percent, request_amount, pdf_path, qr_path
+                FROM invoice_requests
+                WHERE invoice_no = ?
+                ORDER BY requested_at DESC, id DESC
                 """,
-                (
-                    str(payment_update_path),
-                    str(final_pdf_path or ""),
-                    row[3],
-                ),
+                (invoice_no,),
+            ).fetchall()
+
+        if not invoice or not requests:
+            return True
+        source_xlsx = Path(invoice[0]) if invoice[0] else None
+        source_pdf = Path(invoice[1]) if invoice[1] else None
+        if not source_xlsx or not source_xlsx.is_file() or not source_pdf or not source_pdf.is_file():
+            return False
+
+        invoice_total = money(invoice[2] or 0)
+        paid_total = money(invoice[3] or 0)
+        balance_due = max(Decimal("0.00"), invoice_total - paid_total)
+        recognized_paid = min(invoice_total, paid_total)
+        received_percent = (
+            recognized_paid / invoice_total * 100
+            if invoice_total > 0 else Decimal("0")
+        )
+        updated_paths = {}
+
+        try:
+            for request_id, request_percent, request_amount, request_pdf, qr_path in requests:
+                if not request_pdf:
+                    continue
+                request_pdf = Path(request_pdf)
+                payment_update_path = request_pdf.with_name(
+                    f"{request_pdf.stem}_PAYMENT_STATUS.pdf"
+                )
+                request_qr = Path(qr_path) if qr_path and Path(qr_path).is_file() else None
+                with tempfile.TemporaryDirectory(dir=DATA_DIR) as temp_dir:
+                    request_xlsx = Path(temp_dir) / f"request_{request_id}.xlsx"
+                    request_output = Path(temp_dir) / f"request_{request_id}.pdf"
+                    shutil.copy2(source_xlsx, request_xlsx)
+                    workbook = load_workbook(request_xlsx)
+                    sheet = workbook.active
+                    sheet["H44"] = (
+                        f"Request: {request_percent:g}% / "
+                        f"INR {money(request_amount):.2f}"
+                    )
+                    sheet["H45"] = (
+                        f"Total paid: {format(received_percent.normalize(), 'f')}% / "
+                        f"INR {recognized_paid:.2f}"
+                    )
+                    sheet["H46"] = f"Balance due: INR {balance_due:.2f}"
+
+                    qr_image_index = next(
+                        (
+                            index for index, image in enumerate(sheet._images)
+                            if getattr(image.anchor, "_from", None)
+                            and image.anchor._from.col == 6
+                            and image.anchor._from.row == 43
+                        ),
+                        None,
+                    )
+                    if qr_image_index is not None:
+                        if request_qr:
+                            original_image = sheet._images[qr_image_index]
+                            request_image = SpreadsheetImage(str(request_qr))
+                            request_image.width = original_image.width
+                            request_image.height = original_image.height
+                            request_image.anchor = original_image.anchor
+                            sheet._images[qr_image_index] = request_image
+                        else:
+                            sheet._images.pop(qr_image_index)
+                    elif request_qr:
+                        request_image = SpreadsheetImage(str(request_qr))
+                        request_image.width = 60
+                        request_image.height = 60
+                        request_image.anchor = "G44"
+                        sheet.add_image(request_image)
+
+                    workbook.save(request_xlsx)
+                    workbook.close()
+                    self.export_xlsx_to_pdf(request_xlsx, request_output)
+                    payment_update_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(request_output, payment_update_path)
+                updated_paths[request_id] = str(payment_update_path)
+
+            fully_paid = invoice_total > 0 and balance_due == 0
+            final_pdf_path = (
+                source_pdf.with_name(
+                    f"Invoice_{source_pdf.stem.removeprefix('INV-')}_Paid.pdf"
+                )
+                if fully_paid else None
             )
+            if final_pdf_path:
+                shutil.copy2(source_pdf, final_pdf_path)
+
+            latest_request_id = requests[0][0]
+            with sqlite3.connect(DB_PATH) as con:
+                for request_id, payment_update_path in updated_paths.items():
+                    con.execute(
+                        """
+                        UPDATE invoice_requests
+                        SET payment_update_path = ?, final_pdf_path = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            payment_update_path,
+                            str(final_pdf_path or "")
+                            if request_id == latest_request_id else "",
+                            request_id,
+                        ),
+                    )
+        except Exception:
+            return False
         return True
 
 
@@ -3955,12 +4214,7 @@ class InvoiceApp(QMainWindow):
         if document_kind_for_selection(self.document_kind.currentIndex()) != "INVOICE":
             return
 
-        if not self.save_invoice(show_dialog=False, show_success=False):
-            QMessageBox.warning(
-                self,
-                "Invoice Not Saved",
-                "Save a valid invoice before recording a payment.",
-            )
+        if not self.save_invoice(show_dialog=True, show_success=False):
             return
 
         invoice_no = int(self.invoice_no.text())
@@ -4025,11 +4279,11 @@ class InvoiceApp(QMainWindow):
                 "The payment and workbook were saved, but the PDF could not be refreshed.",
             )
             return
-        if not self.sync_latest_invoice_request_pdf(invoice_no):
+        if not self.sync_invoice_request_pdfs(invoice_no):
             QMessageBox.warning(
                 self,
                 "Request PDF Refresh Failed",
-                "The invoice PDF was updated, but the latest request history PDF could not be refreshed.",
+                "The invoice PDF was updated, but request history PDFs could not be refreshed.",
             )
 
         self.reset_receipt_amount_autofill()
@@ -4217,6 +4471,12 @@ class InvoiceApp(QMainWindow):
                         str(snapshot_pdf_path),
                         str(snapshot_qr_path or ""),
                     ),
+                )
+            if not self.sync_invoice_request_pdfs(invoice_no):
+                QMessageBox.warning(
+                    self,
+                    "Request PDF Refresh Failed",
+                    "The request was created, but its payment-history PDF could not be refreshed.",
                 )
             attachment_paths = (
                 [snapshot_pdf_path.resolve()] if attach_invoice else []
@@ -4750,6 +5010,10 @@ class InvoiceApp(QMainWindow):
         )
         balance_due = max(Decimal("0.00"), money(total - paid_total))
         received_percent = float(paid_total / total * 100) if total else 0
+        payment_request_amount = min(
+            money(total * Decimal(str(self.payment_percent.value())) / 100),
+            balance_due,
+        ) if document_kind == "INVOICE" else Decimal("0.00")
         authorised_signatory = sheet["F50"].value or "Authorised Signatory"
         for row in sheet.iter_rows():
             for cell in row:
@@ -4934,8 +5198,13 @@ class InvoiceApp(QMainWindow):
                 "D45": f"A/C No: {self.bank_account.text()}",
                 "D46": f"IFSC: {self.bank_ifsc.text()}",
                 "G43": "PAYMENT SUMMARY",
-                "H44": f"Payment received: {received_percent:g}%",
-                "H45": f"Received: INR {paid_total:.2f}",
+                "H44": (
+                    "PAID IN FULL"
+                    if balance_due <= 0
+                    else f"Request: {self.payment_percent.value():g}% / "
+                         f"INR {payment_request_amount:.2f}"
+                ),
+                "H45": f"Total paid: {received_percent:g}% / INR {paid_total:.2f}",
                 "H46": f"Balance due: INR {balance_due:.2f}",
                 "A47": "Declaration",
                 "A48": self.declaration.toPlainText().strip(),
@@ -5293,7 +5562,11 @@ class InvoiceApp(QMainWindow):
             document_kind == "INVOICE"
             and self.bank_upi_id.text().strip()
         ):
-            payment_uri = self.payment_uri(invoice_no)
+            payment_uri = self.payment_uri(
+                invoice_no,
+                payment_request_amount
+                if balance_due > 0 and payment_request_amount > 0 else None,
+            )
             qr_path = self.quotation_payment_qr_path(
                 invoice_no, invoice_date, total
             )
@@ -5439,7 +5712,7 @@ class InvoiceApp(QMainWindow):
                 return False
 
             mobile = self.customer_mobile.text().strip()
-            if not normalize_indian_mobile(mobile):
+            if mobile and not normalize_indian_mobile(mobile):
                 if show_dialog:
                     QMessageBox.warning(
                         self,
@@ -5738,7 +6011,8 @@ class InvoiceApp(QMainWindow):
                 result = subprocess.run(
                     [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
                     capture_output=True,
-                    text=True
+                    text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 if result.returncode:
                     raise RuntimeError(
@@ -5812,6 +6086,9 @@ class InvoiceApp(QMainWindow):
                     )
 
                 )
+
+            if document_kind == "INVOICE":
+                self.refresh_invoice_request_history()
 
 
             self.statusBar().showMessage(
