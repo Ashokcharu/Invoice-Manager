@@ -3783,8 +3783,6 @@ class InvoiceApp(QMainWindow):
             paid_total = self.invoice_paid_total(int(self.invoice_no.text()))
 
         balance_due = max(Decimal("0.00"), money(total - paid_total))
-        if total > 0 and balance_due == 0 and self.payment_percent.value() != 0:
-            self.payment_percent.setValue(0)
         requested_amount = min(
             money(total * Decimal(str(self.payment_percent.value())) / 100),
             balance_due,
@@ -3879,12 +3877,22 @@ class InvoiceApp(QMainWindow):
         whatsapp_web_url = QUrl(
             f"https://web.whatsapp.com/send?phone={mobile}&text={quote(message)}"
         )
-        if sys.platform.startswith(("linux", "win")):
-            return QDesktopServices.openUrl(whatsapp_web_url)
-
         whatsapp_url = QUrl(
             f"whatsapp://send?phone={mobile}&text={quote(message)}"
         )
+        if sys.platform == "win32":
+            try:
+                import winreg
+
+                with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "whatsapp") as protocol_key:
+                    winreg.QueryValueEx(protocol_key, "URL Protocol")
+            except (ImportError, OSError):
+                return QDesktopServices.openUrl(whatsapp_web_url)
+            if QDesktopServices.openUrl(whatsapp_url):
+                return True
+            return QDesktopServices.openUrl(whatsapp_web_url)
+        if sys.platform.startswith("linux"):
+            return QDesktopServices.openUrl(whatsapp_web_url)
         if QDesktopServices.openUrl(whatsapp_url):
             return True
         return QDesktopServices.openUrl(whatsapp_web_url)
@@ -3946,6 +3954,73 @@ class InvoiceApp(QMainWindow):
         return True
 
 
+    def export_xlsx_batch_to_pdf(self, jobs):
+
+        jobs = [(Path(xlsx), Path(pdf)) for xlsx, pdf in jobs]
+        if not jobs:
+            return True
+
+        if sys.platform == "win32":
+            powershell = shutil.which("powershell.exe")
+            if not powershell:
+                raise RuntimeError("Windows PowerShell was not found.")
+            job_values = ", ".join(
+                "@{Workbook='" + str(xlsx.resolve()).replace("'", "''")
+                + "'; Pdf='" + str(pdf.resolve()).replace("'", "''") + "'}"
+                for xlsx, pdf in jobs
+            )
+            script = (
+                "$excel = $null; "
+                "try { "
+                "$excel = New-Object -ComObject Excel.Application; "
+                "$excel.Visible = $false; $excel.DisplayAlerts = $false; "
+                f"$jobs = @({job_values}); "
+                "foreach ($job in $jobs) { "
+                "$book = $null; "
+                "try { "
+                "$book = $excel.Workbooks.Open($job.Workbook); "
+                "$book.ExportAsFixedFormat(0, $job.Pdf); "
+                "} finally { if ($book) { $book.Close($false) } } "
+                "} "
+                "} finally { if ($excel) { $excel.Quit() } }"
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True,
+                text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode:
+                raise RuntimeError(result.stderr or result.stdout)
+        else:
+            libreoffice = shutil.which("libreoffice") or shutil.which("soffice")
+            if not libreoffice:
+                raise RuntimeError("LibreOffice is required to refresh request PDFs.")
+            output_dir = jobs[0][1].parent
+            if any(pdf.parent != output_dir for _, pdf in jobs):
+                raise ValueError("Batch PDF outputs must share one folder.")
+            result = subprocess.run(
+                [
+                    libreoffice,
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", str(output_dir),
+                    *(str(xlsx) for xlsx, _ in jobs),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode:
+                raise RuntimeError(result.stderr or result.stdout)
+
+        missing_pdfs = [str(pdf) for _, pdf in jobs if not pdf.is_file()]
+        if missing_pdfs:
+            raise RuntimeError(
+                "PDF export did not create: " + ", ".join(missing_pdfs)
+            )
+        return True
+
+
     def sync_invoice_request_pdfs(self, invoice_no):
 
         with sqlite3.connect(DB_PATH) as con:
@@ -3987,15 +4062,20 @@ class InvoiceApp(QMainWindow):
         updated_paths = {}
 
         try:
-            for request_id, request_percent, request_amount, request_pdf, qr_path in requests:
-                if not request_pdf:
-                    continue
-                request_pdf = Path(request_pdf)
-                payment_update_path = request_pdf.with_name(
-                    f"{request_pdf.stem}_PAYMENT_STATUS.pdf"
-                )
-                request_qr = Path(qr_path) if qr_path and Path(qr_path).is_file() else None
-                with tempfile.TemporaryDirectory(dir=DATA_DIR) as temp_dir:
+            with tempfile.TemporaryDirectory(dir=DATA_DIR) as temp_dir:
+                jobs = []
+                job_targets = []
+                for request_id, request_percent, request_amount, request_pdf, qr_path in requests:
+                    if not request_pdf:
+                        continue
+                    request_pdf = Path(request_pdf)
+                    payment_update_path = request_pdf.with_name(
+                        f"{request_pdf.stem}_PAYMENT_STATUS.pdf"
+                    )
+                    request_qr = (
+                        Path(qr_path)
+                        if qr_path and Path(qr_path).is_file() else None
+                    )
                     request_xlsx = Path(temp_dir) / f"request_{request_id}.xlsx"
                     request_output = Path(temp_dir) / f"request_{request_id}.pdf"
                     shutil.copy2(source_xlsx, request_xlsx)
@@ -4039,10 +4119,15 @@ class InvoiceApp(QMainWindow):
 
                     workbook.save(request_xlsx)
                     workbook.close()
-                    self.export_xlsx_to_pdf(request_xlsx, request_output)
+                    jobs.append((request_xlsx, request_output))
+                    job_targets.append((request_id, request_output))
+                    updated_paths[request_id] = str(payment_update_path)
+
+                self.export_xlsx_batch_to_pdf(jobs)
+                for request_id, request_output in job_targets:
+                    payment_update_path = Path(updated_paths[request_id])
                     payment_update_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(request_output, payment_update_path)
-                updated_paths[request_id] = str(payment_update_path)
 
             fully_paid = invoice_total > 0 and balance_due == 0
             final_pdf_path = (
