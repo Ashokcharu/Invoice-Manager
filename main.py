@@ -74,12 +74,18 @@ import qrcode
 # PATHS
 # ============================================================
 
-APP_DIR = Path(__file__).resolve().parent
-RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+APP_DIR = (
+    Path(sys.executable).resolve().parent
+    if IS_FROZEN else Path(__file__).resolve().parent
+)
+RESOURCE_DIR = BUNDLE_DIR
 
 DATA_DIR = APP_DIR / "data"
 INVOICE_DIR = APP_DIR / "invoices"
 PRIVATE_INVOICE_DIR = INVOICE_DIR / "Private"
+TEMPLATE_DIR = RESOURCE_DIR / "data"
 
 DB_PATH = DATA_DIR / "invoices.db"
 SIGNATURE_PATH = DATA_DIR / "invoice_signature.png"
@@ -884,14 +890,15 @@ class InvoiceApp(QMainWindow):
             number for number, saved_private in numbers
             if bool(saved_private) == bool(is_private)
         ]
-        series_start = (
-            START_PRIVATE_INVOICE_NUMBER
-            if document_kind == "INVOICE" and is_private
-            else START_INVOICE_NUMBER
-        )
-        next_number = max(
-            series_start,
-            max(series_numbers, default=series_start - 1) + 1,
+        if document_kind == "INVOICE" and is_private:
+            manual_private_numbers = [
+                number for number in series_numbers
+                if number < START_PRIVATE_INVOICE_NUMBER
+            ]
+            series_numbers = manual_private_numbers
+        next_number = (
+            max(series_numbers) + 1
+            if series_numbers else START_INVOICE_NUMBER
         )
         while next_number in used_numbers:
             next_number += 1
@@ -1229,7 +1236,7 @@ class InvoiceApp(QMainWindow):
 
     def invoice_storage_root(self, document_kind, invoice_no, grand_total=None):
 
-        root = (
+        return (
             self.custom_output_dir
             or (
                 PRIVATE_INVOICE_DIR
@@ -1237,21 +1244,29 @@ class InvoiceApp(QMainWindow):
                 else INVOICE_DIR
             )
         )
-        if document_kind != "INVOICE":
-            return root
 
-        if grand_total is None:
-            with sqlite3.connect(DB_PATH) as con:
-                invoice = con.execute(
-                    "SELECT grand_total FROM invoices "
-                    "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
-                    (invoice_no,),
-                ).fetchone()
-            grand_total = invoice[0] if invoice else self.calculate()[3]
 
-        if money(grand_total or 0) > self.invoice_paid_total(invoice_no):
-            return root / "Pending"
-        return root
+    def invoice_pdf_folder(self, document_kind, invoice_no, invoice_date):
+
+        document_root = self.invoice_storage_root(document_kind, invoice_no)
+        document_folder = document_folder_for_selection(
+            document_kind_selection_for_kind(document_kind)
+        )
+        if IS_FROZEN and sys.platform == "win32":
+            if document_kind == "QUOTATION":
+                series_folder = "Quotation"
+            elif self.private_invoice_checkbox.isChecked():
+                series_folder = "Private"
+            else:
+                series_folder = "Invoices"
+            pdf_root = self.custom_output_dir or INVOICE_DIR
+            return (
+                pdf_root / f"{series_folder}_PDF_{invoice_date.year}"
+                / invoice_date.strftime("%B")
+            )
+        return (
+            document_root / document_folder / "PDF" / str(invoice_date.year)
+        )
 
 
     def quotation_payment_qr_path(self, invoice_no, invoice_date, grand_total=None):
@@ -1370,30 +1385,6 @@ class InvoiceApp(QMainWindow):
                 )
         self.invoice_date.setDate(QDate.fromString(row[0], "yyyy-MM-dd"))
         self.invoice_type.setCurrentIndex(0 if row[1] == "IGST" else 1)
-        website_contact = "   ".join(
-            str(value).strip()
-            for value in (sheet["A8"].value, sheet["E8"].value)
-            if value is not None and str(value).strip()
-        )
-        email_contact = "   ".join(
-            str(value).strip()
-            for value in (sheet["A9"].value, sheet["E9"].value)
-            if value is not None and str(value).strip()
-        )
-        seller_values = (
-            (self.seller_name, sheet["A2"].value),
-            (self.seller_business, sheet["A3"].value),
-            (self.seller_address_1, sheet["A4"].value),
-            (self.seller_address_2, sheet["A5"].value),
-            (self.seller_gstin, cell_text("A6", "GSTIN :") or cell_text("A6", "GSTIN:")),
-            (self.seller_state, sheet["A7"].value),
-            (self.seller_website_phone, website_contact),
-            (self.seller_email_phone, email_contact),
-        )
-        for field, value in seller_values:
-            if value is not None and str(value).strip():
-                field.setText(str(value))
-
         self.customer_name.setText(cell_text("A11"))
         customer_address = sheet["A12"].value
         if not customer_address:
@@ -1429,9 +1420,6 @@ class InvoiceApp(QMainWindow):
                 value = cell_text(address, prefix)
                 if value:
                     field.setText(value)
-            self.seller_signatory.setText(
-                cell_text("D47") or cell_text("F47") or self.seller_signatory.text()
-            )
         for field, address in ((self.bundle_count, "A44"), (self.through, "A45")):
             value = sheet[address].value
             if value:
@@ -1440,8 +1428,6 @@ class InvoiceApp(QMainWindow):
             (self.bank_name, "F44"),
             (self.bank_account, "F45"),
             (self.bank_ifsc, "F46"),
-            (self.seller_signatory, "F47"),
-            (self.jurisdiction, "A51"),
         ):
             value = sheet[address].value
             if value is not None and str(value).strip():
@@ -2656,6 +2642,17 @@ class InvoiceApp(QMainWindow):
             "font-weight: 600; border-bottom: 3px solid #21866b; }"
         )
         layout.addWidget(self.create_mode_tabs)
+        top_actions = QHBoxLayout()
+        self.new_document_button = QPushButton("+ New Invoice")
+        self.new_document_button.clicked.connect(self.new_invoice)
+        self.private_invoice_checkbox = QCheckBox("Private invoice")
+        self.private_invoice_checkbox.toggled.connect(
+            self.private_invoice_changed
+        )
+        top_actions.addWidget(self.new_document_button)
+        top_actions.addWidget(self.private_invoice_checkbox)
+        top_actions.addStretch()
+        layout.addLayout(top_actions)
         scroll_area = QScrollArea()
         self.invoice_scroll_area = scroll_area
         scroll_area.setWidgetResizable(True)
@@ -3116,8 +3113,6 @@ class InvoiceApp(QMainWindow):
         page_layout.addWidget(footer_box)
 
         action_row = QHBoxLayout()
-        self.new_document_button = QPushButton("New Invoice")
-        self.new_document_button.clicked.connect(self.new_invoice)
         self.whatsapp_button = QPushButton("WhatsApp Invoice")
         self.whatsapp_button.setObjectName("primary")
         self.whatsapp_button.clicked.connect(self.share_document_whatsapp)
@@ -3130,12 +3125,6 @@ class InvoiceApp(QMainWindow):
         self.save_document_button.clicked.connect(
             lambda checked=False: self.save_document_bundle()
         )
-        self.private_invoice_checkbox = QCheckBox("Private invoice")
-        self.private_invoice_checkbox.toggled.connect(
-            self.private_invoice_changed
-        )
-        action_row.addWidget(self.new_document_button)
-        action_row.addWidget(self.private_invoice_checkbox)
         action_row.addWidget(self.save_document_button)
         action_row.addWidget(self.whatsapp_button)
         action_row.addWidget(self.attach_invoice_checkbox)
@@ -3161,6 +3150,33 @@ class InvoiceApp(QMainWindow):
         self.pending_invoices_tab = QWidget()
         layout = QVBoxLayout(self.pending_invoices_tab)
         toolbar = QHBoxLayout()
+        self.pending_invoice_private = False
+        self.pending_invoice_series_group = QButtonGroup(
+            self.pending_invoices_tab
+        )
+        series_controls = QWidget()
+        series_layout = QHBoxLayout(series_controls)
+        series_layout.setContentsMargins(0, 0, 0, 0)
+        series_layout.setSpacing(0)
+        for button_id, label in ((0, "Invoices"), (1, "Private")):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setMinimumWidth(96)
+            button.setStyleSheet(
+                "QPushButton { background: #eef2f3; color: #405761; "
+                "border: 1px solid #b9c7cb; padding: 7px 12px; }"
+                "QPushButton:checked { background: #155b46; color: white; "
+                "border-color: #155b46; font-weight: 600; }"
+                "QPushButton:hover:!checked { background: #dce8e5; }"
+            )
+            self.pending_invoice_series_group.addButton(button, button_id)
+            series_layout.addWidget(button)
+            if button_id == 0:
+                button.setChecked(True)
+        self.pending_invoice_series_group.idClicked.connect(
+            lambda button_id: self.set_pending_invoice_series(button_id == 1)
+        )
+        toolbar.addWidget(series_controls)
         self.pending_invoice_search = QLineEdit()
         self.pending_invoice_search.setPlaceholderText(
             "Search customer or invoice number"
@@ -3230,6 +3246,12 @@ class InvoiceApp(QMainWindow):
         self.refresh_pending_invoices()
 
 
+    def set_pending_invoice_series(self, is_private):
+
+        self.pending_invoice_private = is_private
+        self.reset_pending_invoice_page()
+
+
     def change_pending_invoice_page(self, offset):
 
         self.pending_invoice_page += offset
@@ -3255,14 +3277,18 @@ class InvoiceApp(QMainWindow):
                 LEFT JOIN invoice_payments AS p
                   ON p.document_kind = i.document_kind
                  AND p.invoice_no = i.invoice_no
-                WHERE i.document_kind = 'INVOICE'
+                WHERE i.document_kind = 'INVOICE' AND i.is_private = ?
                 GROUP BY i.id
                 HAVING {paid_filter}
                    (COALESCE(i.customer_name, '') LIKE ?
                     OR CAST(i.invoice_no AS TEXT) LIKE ?)
                 ORDER BY i.invoice_date DESC, i.invoice_no DESC
                 """,
-                (search_pattern, search_pattern),
+                (
+                    int(self.pending_invoice_private),
+                    search_pattern,
+                    search_pattern,
+                ),
             ).fetchall()
 
         page_count = max(
@@ -3292,7 +3318,8 @@ class InvoiceApp(QMainWindow):
                 )
 
         self.pending_page_label.setText(
-            f"Page {self.pending_invoice_page + 1} of {page_count} · {len(rows)} invoices"
+            f"Page {self.pending_invoice_page + 1} of {page_count} · "
+            f"{len(rows)} {'private ' if self.pending_invoice_private else ''}invoices"
         )
         self.pending_previous_button.setEnabled(self.pending_invoice_page > 0)
         self.pending_next_button.setEnabled(self.pending_invoice_page + 1 < page_count)
@@ -3500,7 +3527,9 @@ class InvoiceApp(QMainWindow):
         self.save_document_draft("QUOTATION")
         self.document_kind.setCurrentIndex(0)
         quotation_state.update({
-            "invoice_no": str(self.next_invoice_number("INVOICE")),
+            "invoice_no": str(
+                self.next_invoice_number("INVOICE", is_private=False)
+            ),
             "invoice_date": QDate.currentDate().toString("yyyy-MM-dd"),
             "payment_percent": 50,
             "private_invoice": False,
@@ -4068,6 +4097,28 @@ class InvoiceApp(QMainWindow):
             self.payment_request_amount.setValue(float(balance_due))
 
 
+    def set_payment_fields_to_balance(self):
+
+        invoice_no = self.invoice_no.text().strip()
+        if not invoice_no.isdigit():
+            return
+        total = self.calculate()[3]
+        paid_total = self.invoice_paid_total(int(invoice_no))
+        balance_due = max(Decimal("0.00"), money(total - paid_total))
+        self._payment_request_source = "amount"
+        self.payment_request_amount.setValue(float(balance_due))
+        request_percent = (
+            money(balance_due / total * 100) if total > 0 else Decimal("0.00")
+        )
+        self.payment_percent.setValue(float(request_percent))
+        self.reset_receipt_amount_autofill()
+        self._updating_receipt_amount = True
+        self.receipt_amount.setValue(float(balance_due))
+        self._updating_receipt_amount = False
+        self._auto_receipt_amount = balance_due
+        self.refresh_payment_request()
+
+
     def validate_payment_request(self):
 
         if document_kind_for_selection(self.document_kind.currentIndex()) != "INVOICE":
@@ -4129,7 +4180,7 @@ class InvoiceApp(QMainWindow):
 
     def refresh_invoice_after_payment_change(self):
 
-        self.adjust_payment_request_to_balance()
+        self.set_payment_fields_to_balance()
         if not self.save_invoice(show_dialog=False, show_success=False):
             QMessageBox.warning(
                 self,
@@ -4321,7 +4372,8 @@ class InvoiceApp(QMainWindow):
             ).fetchone()
             requests = con.execute(
                 """
-                SELECT id, request_percent, request_amount, pdf_path, qr_path
+                  SELECT id, request_percent, request_amount, pdf_path, qr_path,
+                      final_pdf_path
                 FROM invoice_requests
                 WHERE invoice_no = ?
                 ORDER BY requested_at DESC, id DESC
@@ -4350,7 +4402,10 @@ class InvoiceApp(QMainWindow):
             with tempfile.TemporaryDirectory(dir=DATA_DIR) as temp_dir:
                 jobs = []
                 job_targets = []
-                for request_id, request_percent, request_amount, request_pdf, qr_path in requests:
+                for (
+                    request_id, request_percent, request_amount, request_pdf,
+                    qr_path, _previous_final_pdf_path,
+                ) in requests:
                     if not request_pdf:
                         continue
                     request_pdf = Path(request_pdf)
@@ -4414,29 +4469,26 @@ class InvoiceApp(QMainWindow):
                     payment_update_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(request_output, payment_update_path)
 
-            fully_paid = invoice_total > 0 and balance_due == 0
-            final_pdf_path = (
-                source_pdf.with_name(
-                    f"Invoice_{source_pdf.stem.removeprefix('INV-')}_Paid.pdf"
-                )
-                if fully_paid else None
+            legacy_paid_pdf = source_pdf.with_name(
+                f"Invoice_{source_pdf.stem.removeprefix('INV-')}_Paid.pdf"
             )
-            if final_pdf_path:
-                shutil.copy2(source_pdf, final_pdf_path)
+            if legacy_paid_pdf.is_file():
+                legacy_paid_pdf.unlink()
+            for request in requests:
+                previous_final_pdf = Path(request[5]) if request[5] else None
+                if previous_final_pdf and previous_final_pdf.is_file():
+                    previous_final_pdf.unlink()
 
-            latest_request_id = requests[0][0]
             with sqlite3.connect(DB_PATH) as con:
                 for request_id, payment_update_path in updated_paths.items():
                     con.execute(
                         """
                         UPDATE invoice_requests
-                        SET payment_update_path = ?, final_pdf_path = ?
+                        SET payment_update_path = ?, final_pdf_path = ''
                         WHERE id = ?
                         """,
                         (
                             payment_update_path,
-                            str(final_pdf_path or "")
-                            if request_id == latest_request_id else "",
                             request_id,
                         ),
                     )
@@ -4633,7 +4685,7 @@ class InvoiceApp(QMainWindow):
                 ),
             )
 
-        self.adjust_payment_request_to_balance()
+        self.set_payment_fields_to_balance()
         if not self.save_invoice(show_dialog=False, show_success=False):
             self.refresh_invoice_payments()
             QMessageBox.warning(
@@ -4694,7 +4746,7 @@ class InvoiceApp(QMainWindow):
             "TAX INVOICE" if is_invoice_selection else "QUOTATION"
         )
         self.new_document_button.setText(
-            "New Invoice" if is_invoice_selection else "New Quotation"
+            "+ New Invoice" if is_invoice_selection else "+ New Quotation"
         )
         self.private_invoice_checkbox.setText("Private invoice")
         self.private_invoice_checkbox.setVisible(is_invoice_selection)
@@ -5391,7 +5443,7 @@ class InvoiceApp(QMainWindow):
         document_kind
     ):
 
-        workbook = load_workbook(DATA_DIR / "C GST.xlsx")
+        workbook = load_workbook(TEMPLATE_DIR / "C GST.xlsx")
         sheet = workbook.active
         paid_total = (
             self.invoice_paid_total(invoice_no)
@@ -6137,7 +6189,14 @@ class InvoiceApp(QMainWindow):
             document_folder = document_folder_for_selection(
                 self.document_kind.currentIndex()
             )
-            year_folder = document_root / document_folder / "XLSX" / str(invoice_date.year)
+            workbook_root = document_root
+            if IS_FROZEN and not self.custom_output_dir:
+                workbook_root = DATA_DIR / "workbooks"
+                if document_kind == "INVOICE" and self.private_invoice_checkbox.isChecked():
+                    workbook_root /= "Private"
+            year_folder = (
+                workbook_root / document_folder / "XLSX" / str(invoice_date.year)
+            )
             year_folder.mkdir(parents=True, exist_ok=True)
             output = year_folder / invoice_filename(
                 invoice_no, self.customer_name.text(), ".xlsx", document_kind
@@ -6145,7 +6204,7 @@ class InvoiceApp(QMainWindow):
 
             with sqlite3.connect(DB_PATH) as con:
                 existing_invoice = con.execute(
-                    "SELECT xlsx_path, pdf_path, customer_name, document_kind "
+                    "SELECT xlsx_path, pdf_path, customer_name, document_kind, is_private "
                     "FROM invoices WHERE invoice_no = ? AND document_kind = ?",
                     (invoice_no, document_kind),
                 ).fetchone()
@@ -6164,11 +6223,10 @@ class InvoiceApp(QMainWindow):
                 return False
             if existing_invoice and existing_invoice[0]:
                 previous_xlsx = Path(existing_invoice[0])
-                was_private = previous_xlsx.resolve().is_relative_to(
-                    PRIVATE_INVOICE_DIR.resolve()
-                )
-                will_be_private = output.resolve().is_relative_to(
-                    PRIVATE_INVOICE_DIR.resolve()
+                was_private = bool(existing_invoice[4])
+                will_be_private = (
+                    document_kind == "INVOICE"
+                    and self.private_invoice_checkbox.isChecked()
                 )
                 if was_private and not will_be_private:
                     answer = QMessageBox.question(
@@ -6204,11 +6262,17 @@ class InvoiceApp(QMainWindow):
             if existing_invoice and existing_invoice[0]:
                 previous_xlsx = Path(existing_invoice[0])
                 previous_pdf = Path(existing_invoice[1]) if existing_invoice[1] else None
-                target_pdf = (
-                    document_root / document_folder / "PDF" / str(invoice_date.year)
-                    / f"{output.stem}.pdf"
+                target_pdf_folder = self.invoice_pdf_folder(
+                    document_kind, invoice_no, invoice_date
                 )
-                cleanup_paths = (previous_xlsx, previous_pdf)
+                target_pdf = target_pdf_folder / f"{output.stem}.pdf"
+                cleanup_paths = [previous_xlsx, previous_pdf]
+                if previous_pdf:
+                    cleanup_paths.append(
+                        previous_pdf.with_name(
+                            f"Invoice_{previous_pdf.stem.removeprefix('INV-')}_Paid.pdf"
+                        )
+                    )
                 for old_path in cleanup_paths:
                     if (
                         old_path
@@ -6347,16 +6411,15 @@ class InvoiceApp(QMainWindow):
             document_folder = document_folder_for_selection(
                 self.document_kind.currentIndex()
             )
+            workbook_root = self.invoice_storage_root(
+                document_kind, invoice_no
+            )
+            if IS_FROZEN and not self.custom_output_dir:
+                workbook_root = DATA_DIR / "workbooks"
+                if document_kind == "INVOICE" and self.private_invoice_checkbox.isChecked():
+                    workbook_root /= "Private"
             default_year_folder = (
-                (
-                    self.custom_output_dir
-                    or (
-                        PRIVATE_INVOICE_DIR
-                        if self.private_invoice_checkbox.isChecked()
-                        else INVOICE_DIR
-                    )
-                )
-                / document_folder / "XLSX" / str(invoice_date.year)
+                workbook_root / document_folder / "XLSX" / str(invoice_date.year)
             )
             buyer_name = saved_buyer_name or self.customer_name.text()
             if not xlsx_file or not xlsx_file.exists():
@@ -6383,11 +6446,9 @@ class InvoiceApp(QMainWindow):
                 return False
 
 
-            if len(xlsx_file.parents) > 2 and xlsx_file.parent.parent.name == "XLSX":
-                document_root = xlsx_file.parent.parent.parent
-            else:
-                document_root = INVOICE_DIR / document_folder
-            pdf_folder = document_root / "PDF" / str(invoice_date.year)
+            pdf_folder = self.invoice_pdf_folder(
+                document_kind, invoice_no, invoice_date
+            )
             pdf_folder.mkdir(parents=True, exist_ok=True)
             pdf_file = pdf_folder / f"{xlsx_file.stem}.pdf"
 

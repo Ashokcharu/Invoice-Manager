@@ -39,6 +39,20 @@ jobs:
             --add-data "data/I GST.xlsx;data" `
             main.py
 
+      - name: Prepare PDF output folders
+        shell: pwsh
+        run: |
+          $year = Get-Date -Format "yyyy"
+          $month = Get-Date -Format "MMMM"
+          $folders = @(
+            "dist/AdoodsInvoice/invoices/Invoices_PDF_$year/$month",
+            "dist/AdoodsInvoice/invoices/Private_PDF_$year/$month",
+            "dist/AdoodsInvoice/invoices/Quotation_PDF_$year/$month"
+          )
+          foreach ($folder in $folders) {
+            New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          }
+
       - name: Upload Windows application
         uses: actions/upload-artifact@v4
         with:
