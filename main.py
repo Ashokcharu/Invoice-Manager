@@ -7,7 +7,6 @@ import textwrap
 import re
 import json
 import tempfile
-import webbrowser
 from datetime import datetime
 from copy import copy
 from urllib.parse import quote
@@ -15,10 +14,14 @@ from urllib.parse import quote
 from pathlib import Path
 from decimal import Decimal, ROUND_HALF_UP
 
-from PySide6.QtCore import QDate, QEvent, QTimer, Qt, QStandardPaths, QUrl
+from PySide6.QtCore import (
+    QDate, QEvent, QTimer, Qt, QStandardPaths, QUrl, QRectF, QSize,
+    QRegularExpression,
+)
 from PySide6.QtCore import QMimeData
 from PySide6.QtGui import (
     QFont, QAction, QImage, QImageReader, QColor, QBrush, QDesktopServices,
+    QPainter, QPen, QIcon, QPixmap, QRegularExpressionValidator,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -50,6 +53,9 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QDialog,
     QDialogButtonBox,
+    QStackedWidget,
+    QFrame,
+    QStyle,
 )
 
 from openpyxl import load_workbook
@@ -66,6 +72,7 @@ import qrcode
 # ============================================================
 
 APP_DIR = Path(__file__).resolve().parent
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 
 DATA_DIR = APP_DIR / "data"
 INVOICE_DIR = APP_DIR / "invoices"
@@ -88,6 +95,17 @@ def money(value):
         Decimal("0.01"),
         rounding=ROUND_HALF_UP
     )
+
+
+def normalize_indian_mobile(value):
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    if len(digits) != 10 or digits[0] not in "6789":
+        return ""
+    return f"91{digits}"
 
 
 def number_to_words(value):
@@ -198,6 +216,91 @@ class NoWheelDateEdit(QDateEdit):
         event.ignore()
 
 
+class FinanceDonutChart(QWidget):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.collected = 0.0
+        self.outstanding = 0.0
+        self.setMinimumSize(220, 190)
+
+    def set_values(self, collected, outstanding):
+        self.collected = max(0.0, collected)
+        self.outstanding = max(0.0, outstanding)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        side = min(self.width() - 24, self.height() - 24)
+        chart = QRectF(
+            (self.width() - side) / 2,
+            (self.height() - side) / 2,
+            side,
+            side,
+        )
+        total = self.collected + self.outstanding
+        if total <= 0:
+            painter.setPen(QPen(QColor("#d8e1e8"), 18))
+            painter.drawArc(chart, 0, 360 * 16)
+            return
+
+        collected_angle = round(self.collected / total * 360 * 16)
+        painter.setPen(QPen(QColor("#21866b"), 18))
+        painter.drawArc(chart, 90 * 16, -collected_angle)
+        painter.setPen(QPen(QColor("#e7a34d"), 18))
+        painter.drawArc(chart, 90 * 16 - collected_angle, -(360 * 16 - collected_angle))
+        painter.setPen(QColor("#253b4a"))
+        painter.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        painter.drawText(chart, Qt.AlignmentFlag.AlignCenter, "INVOICED")
+
+
+class FinanceMonthlyChart(QWidget):
+
+    MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.values = [0.0] * 12
+        self.setMinimumHeight(250)
+
+    def set_values(self, values):
+        self.values = list(values[:12]) + [0.0] * max(0, 12 - len(values))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        left, right, top, bottom = 42, 16, 16, 34
+        chart = self.rect().adjusted(left, top, -right, -bottom)
+        max_value = max(self.values, default=0)
+        max_value = max_value or 1
+        painter.setPen(QPen(QColor("#dce4e9"), 1))
+        for fraction in (0, 0.5, 1):
+            y = chart.bottom() - chart.height() * fraction
+            painter.drawLine(chart.left(), round(y), chart.right(), round(y))
+        slot = chart.width() / 12
+        bar_width = max(7, slot * 0.54)
+        for index, value in enumerate(self.values):
+            bar_height = chart.height() * value / max_value
+            bar = QRectF(
+                chart.left() + slot * index + (slot - bar_width) / 2,
+                chart.bottom() - bar_height,
+                bar_width,
+                bar_height,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#21866b" if value else "#e3e9ed"))
+            painter.drawRoundedRect(bar, 3, 3)
+            painter.setPen(QColor("#667783"))
+            painter.setFont(QFont("Segoe UI", 8))
+            painter.drawText(
+                QRectF(chart.left() + slot * index, chart.bottom() + 7, slot, 20),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                self.MONTHS[index],
+            )
+
+
 # ============================================================
 # APPLICATION
 # ============================================================
@@ -211,6 +314,7 @@ class InvoiceApp(QMainWindow):
         self.private_move_cancelled = False
         self.active_document_kind = None
         self.setWindowTitle("Invoice Manager")
+        self.setWindowIcon(QIcon(str(RESOURCE_DIR / "app.ico")))
         self.resize(1280, 820)
         self.setMinimumSize(1050, 700)
 
@@ -349,14 +453,14 @@ class InvoiceApp(QMainWindow):
             background: #dceeff;
         }
         QPushButton#primary {
-            background: #0078d4;
-            border-color: #0078d4;
+            background: #21866b;
+            border-color: #21866b;
             color: #ffffff;
             font-weight: 600;
         }
         QPushButton#primary:hover {
-            background: #006cbe;
-            border-color: #006cbe;
+            background: #176b56;
+            border-color: #176b56;
         }
         QListWidget::item {
             padding: 5px 8px;
@@ -826,6 +930,15 @@ class InvoiceApp(QMainWindow):
         if not name:
             QMessageBox.warning(self, "Buyer Name Required", "Enter a buyer name first.")
             return
+        mobile = self.customer_mobile.text().strip()
+        if not normalize_indian_mobile(mobile):
+            QMessageBox.warning(
+                self,
+                "Invalid Buyer Mobile",
+                "Enter a valid Indian mobile number with 10 digits, optionally prefixed by +91.",
+            )
+            self.customer_mobile.setFocus()
+            return
 
         with sqlite3.connect(DB_PATH) as con:
             con.execute(
@@ -842,7 +955,7 @@ class InvoiceApp(QMainWindow):
                     name,
                     self.customer_address.text().strip(),
                     self.customer_address_2.text().strip(),
-                    self.customer_mobile.text().strip(),
+                    mobile,
                     self.customer_gstin.text().strip(),
                 ),
             )
@@ -1288,46 +1401,456 @@ class InvoiceApp(QMainWindow):
     # UI
     # ========================================================
 
-    def create_ui(self):
+    def sidebar_action_icon(self, kind):
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if kind == "plus":
+            painter.setPen(QPen(QColor("#21866b"), 2.4))
+            painter.drawLine(12, 5, 12, 19)
+            painter.drawLine(5, 12, 19, 12)
+        else:
+            painter.setPen(QPen(QColor("#36515d"), 1.7))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(3.5, 2, 15, 20), 2, 2)
 
-        central = QWidget()
-
-        main_layout = QVBoxLayout(
-            central
-        )
-
-        title = QLabel(
-            "Invoice Manager"
-        )
-
-        title.setFont(
-            QFont(
-                "Segoe UI",
-                20,
-                QFont.Weight.DemiBold
+        if kind == "plus":
+            pass
+        elif kind == "create":
+            painter.drawLine(7, 8, 14, 8)
+            painter.drawLine(7, 11, 13, 11)
+            painter.setPen(QPen(QColor("#21866b"), 2.2))
+            painter.drawLine(18, 15, 18, 22)
+            painter.drawLine(14.5, 18.5, 21.5, 18.5)
+        else:
+            painter.setPen(QColor("#21866b"))
+            painter.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+            painter.drawText(
+                QRectF(5, 2, 13, 13),
+                Qt.AlignmentFlag.AlignCenter,
+                '"',
             )
+            painter.setPen(QPen(QColor("#36515d"), 1.5))
+            painter.drawLine(7, 15, 15, 15)
+            painter.drawLine(7, 18, 15, 18)
+
+        painter.end()
+        return QIcon(pixmap)
+
+
+    def create_ui(self):
+        central = QWidget()
+        root_layout = QHBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        sidebar = QWidget()
+        sidebar.setFixedWidth(196)
+        sidebar.setStyleSheet("background: #e9eff2;")
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(14, 20, 14, 16)
+        sidebar_layout.setSpacing(10)
+        brand = QLabel("ADOODS\nINVOICE MANAGER")
+        brand.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        brand.setStyleSheet("color: #193f4c; padding: 8px 6px 18px;")
+        sidebar_layout.addWidget(brand)
+
+        self.sidebar_navigation = QListWidget()
+        navigation_items = (
+            ("Create", self.sidebar_action_icon("plus")),
+            ("invoices", self.sidebar_action_icon("create")),
+            ("Quotations", self.sidebar_action_icon("quotation")),
+            ("Finance", self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)),
         )
-
-        main_layout.addWidget(title)
-
-
-        subtitle = QLabel(
-            "Create and manage GST invoices"
+        for label, icon in navigation_items:
+            item = QListWidgetItem(icon, label)
+            self.sidebar_navigation.addItem(item)
+        self.sidebar_navigation.setSpacing(4)
+        self.sidebar_navigation.setIconSize(QSize(18, 18))
+        self.sidebar_navigation.setCurrentRow(0)
+        self.sidebar_navigation.setStyleSheet(
+            "QListWidget { border: 0; background: transparent; padding: 2px; }"
+            "QListWidget::item { padding: 12px 10px; border-radius: 4px; "
+            "color: #36515d; font-weight: 600; }"
+            "QListWidget::item:selected { background: #d0e6dd; color: #155b46; }"
+            "QListWidget::item:hover { background: #dce7e8; }"
         )
+        sidebar_layout.addWidget(self.sidebar_navigation, 1)
+        sidebar_note = QLabel("GST invoices\nReceipts & reporting")
+        sidebar_note.setStyleSheet("color: #6f8188; padding: 8px 6px;")
+        sidebar_layout.addWidget(sidebar_note)
+        root_layout.addWidget(sidebar)
 
-        subtitle.setStyleSheet(
-            "color:#666666;"
-        )
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(18, 16, 18, 16)
+        content_layout.setSpacing(8)
+        title = QLabel("Invoice Manager")
+        title.setFont(QFont("Segoe UI", 20, QFont.Weight.DemiBold))
+        content_layout.addWidget(title)
+        subtitle = QLabel("Create and manage GST invoices")
+        subtitle.setStyleSheet("color:#667783;")
+        content_layout.addWidget(subtitle)
 
-        self.main_tabs = QTabWidget()
+        self.main_tabs = QStackedWidget()
         self.invoice_tab = QWidget()
         self.create_invoice_tab()
-        self.main_tabs.addTab(self.invoice_tab, "+ Create Invoice and Quotation")
+        self.main_tabs.addWidget(self.invoice_tab)
         self.create_pending_invoices_tab()
-        self.main_tabs.addTab(self.pending_invoices_tab, "Unpaid Invoices")
+        self.main_tabs.addWidget(self.pending_invoices_tab)
         self.create_quotation_register_tab()
-        self.main_tabs.addTab(self.quotation_register_tab, "Quotations")
-        self.setCentralWidget(self.main_tabs)
+        self.main_tabs.addWidget(self.quotation_register_tab)
+        self.create_finance_tab()
+        self.main_tabs.addWidget(self.finance_tab)
+        self.sidebar_navigation.currentRowChanged.connect(
+            self.main_tabs.setCurrentIndex
+        )
+        self.main_tabs.currentChanged.connect(self.sync_sidebar_navigation)
+        self.main_tabs.currentChanged.connect(self.refresh_finance_if_visible)
+        content_layout.addWidget(self.main_tabs, 1)
+        root_layout.addWidget(content, 1)
+        self.setCentralWidget(central)
+        return
+
+
+    def finance_metric_card(self, title):
+
+        card = QFrame()
+        card.setStyleSheet(
+            "QFrame { background: #ffffff; border: 1px solid #d9e2e6; "
+            "border-radius: 5px; }"
+        )
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(15, 12, 15, 12)
+        card_layout.setSpacing(5)
+        title_label = QLabel(title.upper())
+        title_label.setStyleSheet(
+            "color: #657780; border: 0; font-size: 8pt; font-weight: 600;"
+        )
+        value_label = QLabel("₹0.00")
+        value_label.setFont(QFont("Segoe UI", 17, QFont.Weight.DemiBold))
+        value_label.setStyleSheet("color: #193f4c; border: 0;")
+        detail_label = QLabel("")
+        detail_label.setStyleSheet("color: #72828a; border: 0; font-size: 9pt;")
+        card_layout.addWidget(title_label)
+        card_layout.addWidget(value_label)
+        card_layout.addWidget(detail_label)
+        return card, value_label, detail_label
+
+
+    def create_finance_tab(self):
+
+        self.finance_tab = QWidget()
+        tab_layout = QVBoxLayout(self.finance_tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        finance_content = QWidget()
+        scroll_area.setWidget(finance_content)
+        tab_layout.addWidget(scroll_area)
+
+        layout = QVBoxLayout(finance_content)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        heading = QLabel("Financial overview")
+        heading.setFont(QFont("Segoe UI", 17, QFont.Weight.DemiBold))
+        header.addWidget(heading)
+        header.addStretch()
+        header.addWidget(QLabel("Calendar year"))
+        self.finance_year_selector = NoWheelComboBox()
+        self.finance_year_selector.setMinimumWidth(110)
+        header.addWidget(self.finance_year_selector)
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh_finance_dashboard)
+        header.addWidget(refresh_button)
+        layout.addLayout(header)
+
+        metrics = QHBoxLayout()
+        metrics.setSpacing(10)
+        self.finance_collected_card, self.finance_collected_value, self.finance_collected_detail = (
+            self.finance_metric_card("Collected this year")
+        )
+        self.finance_sales_card, self.finance_sales_value, self.finance_sales_detail = (
+            self.finance_metric_card("Invoiced this year")
+        )
+        self.finance_outstanding_card, self.finance_outstanding_value, self.finance_outstanding_detail = (
+            self.finance_metric_card("Outstanding now")
+        )
+        self.finance_growth_card, self.finance_growth_value, self.finance_growth_detail = (
+            self.finance_metric_card("Collection growth")
+        )
+        for card in (
+            self.finance_collected_card,
+            self.finance_sales_card,
+            self.finance_outstanding_card,
+            self.finance_growth_card,
+        ):
+            metrics.addWidget(card, 1)
+        layout.addLayout(metrics)
+
+        charts = QHBoxLayout()
+        trend_box = QGroupBox("Monthly receipts")
+        trend_layout = QVBoxLayout(trend_box)
+        self.finance_monthly_chart = FinanceMonthlyChart()
+        trend_layout.addWidget(self.finance_monthly_chart)
+        self.finance_monthly_insight = QLabel("Receipts recorded in the selected year")
+        self.finance_monthly_insight.setStyleSheet("color: #657780;")
+        trend_layout.addWidget(self.finance_monthly_insight)
+        charts.addWidget(trend_box, 2)
+
+        mix_box = QGroupBox("Invoice position")
+        mix_layout = QVBoxLayout(mix_box)
+        self.finance_donut_chart = FinanceDonutChart()
+        mix_layout.addWidget(self.finance_donut_chart, 1)
+        self.finance_mix_collected = QLabel("Collected: ₹0.00")
+        self.finance_mix_pending = QLabel("Outstanding: ₹0.00")
+        self.finance_mix_collected.setStyleSheet("color: #21866b; font-weight: 600;")
+        self.finance_mix_pending.setStyleSheet("color: #b7792f; font-weight: 600;")
+        mix_layout.addWidget(self.finance_mix_collected)
+        mix_layout.addWidget(self.finance_mix_pending)
+        charts.addWidget(mix_box, 1)
+        layout.addLayout(charts, 1)
+
+        detail_row = QHBoxLayout()
+        debtors_box = QGroupBox("Largest outstanding customer balances")
+        debtors_layout = QVBoxLayout(debtors_box)
+        self.finance_debtors_table = QTableWidget(0, 3)
+        self.finance_debtors_table.setHorizontalHeaderLabels(
+            ["Customer", "Open invoices", "Balance due"]
+        )
+        self.finance_debtors_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.finance_debtors_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.finance_debtors_table.verticalHeader().setVisible(False)
+        self.finance_debtors_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.finance_debtors_table.setMinimumHeight(170)
+        debtors_layout.addWidget(self.finance_debtors_table)
+        detail_row.addWidget(debtors_box, 3)
+
+        insights_box = QGroupBox("At a glance")
+        insights_layout = QVBoxLayout(insights_box)
+        self.finance_overdue_label = QLabel("Overdue invoices: 0")
+        self.finance_overdue_label.setWordWrap(True)
+        self.finance_overdue_label.setStyleSheet("font-weight: 600; color: #193f4c;")
+        self.finance_year_insight = QLabel("Year-on-year comparison will appear here.")
+        self.finance_year_insight.setWordWrap(True)
+        self.finance_year_insight.setStyleSheet("color: #657780;")
+        self.finance_top_month_insight = QLabel("Best collection month: --")
+        self.finance_top_month_insight.setWordWrap(True)
+        insights_layout.addWidget(self.finance_overdue_label)
+        insights_layout.addWidget(self.finance_year_insight)
+        insights_layout.addWidget(self.finance_top_month_insight)
+        insights_layout.addStretch()
+        detail_row.addWidget(insights_box, 2)
+        layout.addLayout(detail_row)
+
+        self.finance_year_selector.currentTextChanged.connect(
+            self.refresh_finance_dashboard
+        )
+
+
+    def sync_sidebar_navigation(self, index):
+
+        if self.sidebar_navigation.currentRow() != index:
+            self.sidebar_navigation.setCurrentRow(index)
+
+
+    def refresh_finance_if_visible(self, index):
+
+        if index == 3:
+            self.refresh_finance_dashboard()
+
+
+    def refresh_finance_dashboard(self, selected_year=None):
+
+        if not hasattr(self, "finance_year_selector"):
+            return
+        if selected_year is None:
+            selected_year = self.finance_year_selector.currentText()
+
+        with sqlite3.connect(DB_PATH) as con:
+            invoice_rows = con.execute(
+                """
+                SELECT i.invoice_no, i.invoice_date, COALESCE(i.customer_name, ''),
+                       COALESCE(i.grand_total, 0), COALESCE(SUM(p.amount), 0)
+                FROM invoices AS i
+                LEFT JOIN invoice_payments AS p
+                  ON p.document_kind = i.document_kind
+                 AND p.invoice_no = i.invoice_no
+                WHERE i.document_kind = 'INVOICE'
+                GROUP BY i.id
+                ORDER BY i.invoice_date DESC
+                """
+            ).fetchall()
+            payment_rows = con.execute(
+                """
+                SELECT p.paid_on, p.amount
+                FROM invoice_payments AS p
+                INNER JOIN invoices AS i
+                  ON i.document_kind = p.document_kind
+                 AND i.invoice_no = p.invoice_no
+                WHERE p.document_kind = 'INVOICE'
+                """
+            ).fetchall()
+
+        available_years = {datetime.now().year}
+        available_years.update(
+            int(invoice_date[:4])
+            for _, invoice_date, _, _, _ in invoice_rows
+            if invoice_date and invoice_date[:4].isdigit()
+        )
+        available_years.update(
+            int(paid_on[:4])
+            for paid_on, _ in payment_rows
+            if paid_on and paid_on[:4].isdigit()
+        )
+        year_text = str(selected_year or datetime.now().year)
+        self.finance_year_selector.blockSignals(True)
+        self.finance_year_selector.clear()
+        self.finance_year_selector.addItems(
+            [str(year) for year in sorted(available_years, reverse=True)]
+        )
+        if self.finance_year_selector.findText(year_text) >= 0:
+            self.finance_year_selector.setCurrentText(year_text)
+        self.finance_year_selector.blockSignals(False)
+        year_text = self.finance_year_selector.currentText()
+        year = int(year_text) if year_text.isdigit() else datetime.now().year
+        today = datetime.now().date()
+        comparison_cutoff = (
+            f"{year - 1}-{today:%m-%d}"
+            if year == today.year else f"{year - 1}-12-31"
+        )
+        comparison_period = (
+            f"{year - 1} through {today:%b %d}"
+            if year == today.year else str(year - 1)
+        )
+
+        yearly_sales = sum(
+            float(total or 0)
+            for _, invoice_date, _, total, _ in invoice_rows
+            if invoice_date and invoice_date.startswith(year_text)
+        )
+        monthly_receipts = [0.0] * 12
+        yearly_receipts = 0.0
+        previous_year_receipts = 0.0
+        for paid_on, amount in payment_rows:
+            if not paid_on or len(paid_on) < 7:
+                continue
+            payment_year = paid_on[:4]
+            if payment_year == year_text:
+                yearly_receipts += float(amount or 0)
+                try:
+                    month_index = int(paid_on[5:7]) - 1
+                except ValueError:
+                    continue
+                if 0 <= month_index < 12:
+                    monthly_receipts[month_index] += float(amount or 0)
+            elif payment_year == str(year - 1) and paid_on <= comparison_cutoff:
+                previous_year_receipts += float(amount or 0)
+
+        total_collected = 0.0
+        total_outstanding = 0.0
+        overdue_count = 0
+        pending_by_customer = {}
+        for _, invoice_date, customer, total, paid in invoice_rows:
+            invoice_total = max(0.0, float(total or 0))
+            received = max(0.0, float(paid or 0))
+            allocated = min(invoice_total, received)
+            balance = max(0.0, invoice_total - received)
+            total_collected += allocated
+            total_outstanding += balance
+            if balance > 0.005:
+                buyer = customer.strip() or "Unnamed buyer"
+                entry = pending_by_customer.setdefault(buyer, [0, 0.0])
+                entry[0] += 1
+                entry[1] += balance
+                try:
+                    invoice_day = datetime.strptime(invoice_date, "%Y-%m-%d").date()
+                    if (today - invoice_day).days > 30:
+                        overdue_count += 1
+                except (TypeError, ValueError):
+                    pass
+
+        self.finance_collected_value.setText(f"₹{yearly_receipts:,.2f}")
+        self.finance_collected_detail.setText(f"Cash received during {year}")
+        self.finance_sales_value.setText(f"₹{yearly_sales:,.2f}")
+        self.finance_sales_detail.setText(f"Invoices dated in {year}")
+        self.finance_outstanding_value.setText(f"₹{total_outstanding:,.2f}")
+        open_count = sum(count for count, _ in pending_by_customer.values())
+        self.finance_outstanding_detail.setText(f"{open_count} invoice(s) still open")
+
+        if previous_year_receipts > 0:
+            growth = (yearly_receipts - previous_year_receipts) / previous_year_receipts * 100
+            growth_prefix = "+" if growth >= 0 else ""
+            self.finance_growth_value.setText(f"{growth_prefix}{growth:.1f}%")
+            self.finance_growth_detail.setText(
+                f"vs {comparison_period} (₹{previous_year_receipts:,.2f})"
+            )
+            self.finance_year_insight.setText(
+                f"Receipts are {growth_prefix}{growth:.1f}% versus {comparison_period}."
+            )
+        else:
+            self.finance_growth_value.setText("--")
+            self.finance_growth_detail.setText(f"No {year - 1} receipt history")
+            self.finance_year_insight.setText(
+                f"No comparable receipt history for {year - 1}."
+            )
+
+        self.finance_monthly_chart.set_values(monthly_receipts)
+        nonzero_months = [
+            (amount, FinanceMonthlyChart.MONTHS[index])
+            for index, amount in enumerate(monthly_receipts)
+            if amount > 0
+        ]
+        if nonzero_months:
+            best_amount, best_month = max(nonzero_months)
+            self.finance_top_month_insight.setText(
+                f"Best collection month: {best_month} · ₹{best_amount:,.2f}"
+            )
+            latest_index = max(index for index, amount in enumerate(monthly_receipts) if amount > 0)
+            if latest_index > 0 and monthly_receipts[latest_index - 1] > 0:
+                prior = monthly_receipts[latest_index - 1]
+                change = (monthly_receipts[latest_index] - prior) / prior * 100
+                change_prefix = "+" if change >= 0 else ""
+                self.finance_monthly_insight.setText(
+                    f"Latest active month is {change_prefix}{change:.1f}% versus the prior month."
+                )
+            else:
+                self.finance_monthly_insight.setText(
+                    f"Receipts recorded in {year}; strongest month was {best_month}."
+                )
+        else:
+            self.finance_top_month_insight.setText("Best collection month: --")
+            self.finance_monthly_insight.setText(f"No receipts recorded in {year}.")
+
+        self.finance_donut_chart.set_values(total_collected, total_outstanding)
+        self.finance_mix_collected.setText(f"Collected: ₹{total_collected:,.2f}")
+        self.finance_mix_pending.setText(f"Outstanding: ₹{total_outstanding:,.2f}")
+        self.finance_overdue_label.setText(
+            f"Open more than 30 days: {overdue_count} invoice(s)"
+        )
+        sorted_customers = sorted(
+            pending_by_customer.items(), key=lambda item: item[1][1], reverse=True
+        )[:5]
+        self.finance_debtors_table.setRowCount(len(sorted_customers))
+        for row, (customer, (invoice_count, balance)) in enumerate(sorted_customers):
+            for column, value in enumerate((
+                customer,
+                str(invoice_count),
+                f"₹{balance:,.2f}",
+            )):
+                self.finance_debtors_table.setItem(
+                    row, column, QTableWidgetItem(value)
+                )
+
         return
 
         self.invoice_type = NoWheelComboBox()
@@ -1843,6 +2366,18 @@ class InvoiceApp(QMainWindow):
     def create_invoice_tab(self):
 
         layout = QVBoxLayout(self.invoice_tab)
+        self.create_mode_tabs = QTabWidget()
+        self.create_mode_tabs.addTab(QWidget(), "+ Invoice")
+        self.create_mode_tabs.addTab(QWidget(), "+ Quotation")
+        self.create_mode_tabs.setFixedHeight(58)
+        self.create_mode_tabs.setStyleSheet(
+            "QTabWidget::pane { border: 0; }"
+            "QTabBar::tab { min-width: 150px; padding: 9px 18px; "
+            "color: #536873; background: #e9eff2; border: 0; }"
+            "QTabBar::tab:selected { color: #155b46; background: #d0e6dd; "
+            "font-weight: 600; border-bottom: 3px solid #21866b; }"
+        )
+        layout.addWidget(self.create_mode_tabs)
         scroll_area = QScrollArea()
         self.invoice_scroll_area = scroll_area
         scroll_area.setWidgetResizable(True)
@@ -1939,6 +2474,13 @@ class InvoiceApp(QMainWindow):
         self.customer_address = QLineEdit()
         self.customer_address_2 = QLineEdit()
         self.customer_mobile = QLineEdit()
+        self.customer_mobile.setPlaceholderText("10-digit Indian mobile number")
+        self.customer_mobile.setValidator(
+            QRegularExpressionValidator(
+                QRegularExpression(r"[+0-9() -]{0,20}"),
+                self.customer_mobile,
+            )
+        )
         self.customer_gstin = QLineEdit()
         self.buyer_selector = NoWheelComboBox()
         self.buyer_selector.currentIndexChanged.connect(self.load_buyer_profile)
@@ -1966,6 +2508,10 @@ class InvoiceApp(QMainWindow):
         self.invoice_no = QLineEdit()
         self.document_kind = NoWheelComboBox()
         self.document_kind.addItems(["Invoice", "Quotation"])
+        self.document_kind.hide()
+        self.create_mode_tabs.currentChanged.connect(
+            self.document_kind.setCurrentIndex
+        )
         self.document_number_label = QLabel("Invoice No")
         self.invoice_date = NoWheelDateEdit(QDate.currentDate())
         self.invoice_date.setCalendarPopup(True)
@@ -1979,13 +2525,15 @@ class InvoiceApp(QMainWindow):
         self.gst_rate.setDecimals(2)
         self.gst_rate.setValue(5)
         self.gst_rate.setSuffix(" %")
-        invoice_form.addRow("Document", self.document_kind)
         invoice_form.addRow(self.document_number_label, self.invoice_no)
         invoice_form.addRow("Date", self.invoice_date)
         invoice_form.addRow("P.O No", self.po_number)
         invoice_form.addRow("Tax Type", self.invoice_type)
         invoice_form.addRow("GST Rate", self.spinbox_with_arrows(self.gst_rate))
         self.document_kind.currentIndexChanged.connect(self.document_kind_changed)
+        self.document_kind.currentIndexChanged.connect(
+            self.create_mode_tabs.setCurrentIndex
+        )
         self.invoice_no.editingFinished.connect(self.load_invoice)
         party_grid.addWidget(buyer_box, 0, 0)
         party_grid.addWidget(invoice_box, 0, 1)
@@ -2133,14 +2681,18 @@ class InvoiceApp(QMainWindow):
             "HSN/SAC", "", "Taxable Value", "Tax Rate", "Tax Amount",
             "Tax Rate", "Tax Amount", "Total Tax"
         ])
-        self.hsn_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
-        self.hsn_table.horizontalHeader().setMinimumHeight(48)
+        hsn_header = self.hsn_table.horizontalHeader()
+        hsn_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hsn_header.setMinimumSectionSize(72)
+        hsn_header.setMinimumHeight(58)
+        hsn_header.setStretchLastSection(True)
+        self.hsn_table.setWordWrap(True)
         self.hsn_table.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
-        self.hsn_table.setMinimumHeight(112)
+        self.hsn_table.setMinimumHeight(124)
+        for column, width in enumerate((82, 48, 116, 82, 102, 82, 102, 102)):
+            hsn_header.resizeSection(column, width)
         self.hsn_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
         )
@@ -2215,27 +2767,37 @@ class InvoiceApp(QMainWindow):
             footer_grid.addWidget(QLabel(label), row, 0)
             footer_grid.addWidget(field, row, 1)
         signature_row = QHBoxLayout()
-        upload_signature_button = QPushButton("Upload Signature PNG")
-        upload_signature_button.clicked.connect(self.upload_signature)
-        self.signature_image_label = QLabel(
-            self.signature_image_path.name
-            if self.signature_image_path else "No signature selected"
+        self.signature_preview = QLabel("No signature")
+        self.signature_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.signature_preview.setFixedSize(148, 54)
+        self.signature_preview.setStyleSheet(
+            "QLabel { background: #f5f8f7; color: #71817b; "
+            "border: 1px dashed #9db4aa; border-radius: 4px; }"
         )
-        signature_row.addWidget(upload_signature_button)
+        self.signature_image_label = QLabel(
+            "Signature ready for invoices"
+            if self.signature_image_path else "No signature uploaded"
+        )
+        self.signature_image_label.setStyleSheet("color: #657780;")
+        self.upload_signature_button = QPushButton(
+            "Replace signature" if self.signature_image_path else "Upload signature PNG"
+        )
+        self.upload_signature_button.clicked.connect(self.upload_signature)
+        signature_row.addWidget(self.signature_preview)
         signature_row.addWidget(self.signature_image_label)
+        signature_row.addWidget(self.upload_signature_button)
         signature_row.addStretch()
         footer_grid.addLayout(signature_row, len(footer_fields), 0, 1, 2)
+        self.refresh_signature_display()
         page_layout.addWidget(footer_box)
 
         action_row = QHBoxLayout()
         self.new_document_button = QPushButton("New Invoice")
         self.new_document_button.clicked.connect(self.new_invoice)
         self.whatsapp_button = QPushButton("WhatsApp Invoice")
+        self.whatsapp_button.setObjectName("primary")
         self.whatsapp_button.clicked.connect(self.share_document_whatsapp)
         self.whatsapp_button.setVisible(False)
-        self.confirm_order_button = QPushButton("Order Confirmed · Add to Invoice")
-        self.confirm_order_button.clicked.connect(self.convert_quotation_to_invoice)
-        self.confirm_order_button.setVisible(False)
         self.attach_invoice_checkbox = QCheckBox("Attach invoice when sharing")
         self.attach_invoice_checkbox.setChecked(True)
         self.attach_invoice_checkbox.setVisible(False)
@@ -2249,7 +2811,6 @@ class InvoiceApp(QMainWindow):
         action_row.addWidget(self.private_invoice_checkbox)
         action_row.addWidget(self.save_document_button)
         action_row.addWidget(self.whatsapp_button)
-        action_row.addWidget(self.confirm_order_button)
         action_row.addWidget(self.attach_invoice_checkbox)
         action_row.addStretch()
         page_layout.addLayout(action_row)
@@ -2955,12 +3516,12 @@ class InvoiceApp(QMainWindow):
             )
             return
 
-        mobile = re.sub(r"\D", "", self.customer_mobile.text())
-        if len(mobile) == 10:
-            mobile = "91" + mobile
+        mobile = normalize_indian_mobile(self.customer_mobile.text())
         if not mobile:
             QMessageBox.warning(
-                self, "Buyer Mobile Required", "Enter the buyer's mobile number before sharing."
+                self,
+                "Invalid Buyer Mobile",
+                "Enter a valid Indian mobile number before sharing.",
             )
             return
 
@@ -2981,9 +3542,7 @@ class InvoiceApp(QMainWindow):
         mime_data = QMimeData()
         mime_data.setUrls([QUrl.fromLocalFile(str(pdf_path.resolve()))])
         QApplication.clipboard().setMimeData(mime_data)
-        opened = webbrowser.open(
-            f"https://wa.me/{mobile}?text={quote(message)}"
-        )
+        opened = self.open_whatsapp_chat(mobile, message)
         if opened:
             QMessageBox.information(
                 self,
@@ -3178,6 +3737,22 @@ class InvoiceApp(QMainWindow):
         self.refresh_invoice_history()
         self.refresh_pending_invoices()
         return True
+
+
+    def open_whatsapp_chat(self, mobile, message):
+
+        whatsapp_web_url = QUrl(
+            f"https://web.whatsapp.com/send?phone={mobile}&text={quote(message)}"
+        )
+        if sys.platform.startswith("linux"):
+            return QDesktopServices.openUrl(whatsapp_web_url)
+
+        whatsapp_url = QUrl(
+            f"whatsapp://send?phone={mobile}&text={quote(message)}"
+        )
+        if QDesktopServices.openUrl(whatsapp_url):
+            return True
+        return QDesktopServices.openUrl(whatsapp_web_url)
 
 
     def sync_latest_invoice_request_pdf(self, invoice_no):
@@ -3488,7 +4063,7 @@ class InvoiceApp(QMainWindow):
             "Invoice Details" if is_invoice_selection else "Quotation Details"
         )
         self.save_document_button.setText(
-            "Save Invoice + PDF" if is_invoice_selection else "Save Quotation + PDF"
+            "Save Invoice" if is_invoice_selection else "Save Quotation"
         )
         self.invoice_heading.setText(
             "TAX INVOICE" if is_invoice_selection else "QUOTATION"
@@ -3503,10 +4078,9 @@ class InvoiceApp(QMainWindow):
         self.invoice_payments_box.setVisible(is_invoice_selection)
         self.bank_box.setVisible(is_invoice_selection)
         self.invoice_request_history_box.setVisible(is_invoice_selection)
-        self.confirm_order_button.setVisible(not is_invoice_selection)
         self.attach_invoice_checkbox.setVisible(is_invoice_selection)
         self.whatsapp_button.setText(
-            "WhatsApp Invoice" if is_invoice_selection else "WhatsApp Quotation"
+            "Send WhatsApp" if is_invoice_selection else "Send WhatsApp"
         )
         self.whatsapp_button.setVisible(True)
         self.refresh_invoice_payments()
@@ -3679,9 +4253,7 @@ class InvoiceApp(QMainWindow):
             else:
                 message_lines.append("Payment complete")
             message = "\n".join(message_lines)
-        opened = webbrowser.open(
-            f"https://wa.me/{mobile}?text={quote(message)}"
-        )
+        opened = self.open_whatsapp_chat(mobile, message)
         attachment_names = " and ".join(path.name for path in attachment_paths)
         if opened:
             QMessageBox.information(
@@ -3729,7 +4301,33 @@ class InvoiceApp(QMainWindow):
             return
 
         self.signature_image_path = SIGNATURE_PATH
-        self.signature_image_label.setText(self.signature_image_path.name)
+        self.refresh_signature_display()
+
+
+    def refresh_signature_display(self):
+
+        if not self.signature_image_path or not self.signature_image_path.is_file():
+            self.signature_preview.setPixmap(QPixmap())
+            self.signature_preview.setText("No signature")
+            self.signature_image_label.setText("No signature uploaded")
+            self.upload_signature_button.setText("Upload signature PNG")
+            return
+
+        image = QImage(str(self.signature_image_path))
+        if image.isNull():
+            self.signature_preview.setPixmap(QPixmap())
+            self.signature_preview.setText("Preview unavailable")
+        else:
+            self.signature_preview.setText("")
+            self.signature_preview.setPixmap(
+                QPixmap.fromImage(image).scaled(
+                    self.signature_preview.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        self.signature_image_label.setText("Signature ready for invoices")
+        self.upload_signature_button.setText("Replace signature")
 
 
     def add_item_row(self):
@@ -4838,6 +5436,17 @@ class InvoiceApp(QMainWindow):
             if not items:
                 if show_dialog:
                     QMessageBox.warning(self, "No Items", "Please enter at least one item.")
+                return False
+
+            mobile = self.customer_mobile.text().strip()
+            if not normalize_indian_mobile(mobile):
+                if show_dialog:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Buyer Mobile",
+                        "Enter a valid Indian mobile number with 10 digits, optionally prefixed by +91.",
+                    )
+                self.customer_mobile.setFocus()
                 return False
 
             self.save_seller_profile()

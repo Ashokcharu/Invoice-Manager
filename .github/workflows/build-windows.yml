@@ -34,6 +34,7 @@ jobs:
             --onedir `
             --name AdoodsInvoice `
             --icon app.ico `
+            --add-data "app.ico;." `
             --add-data "data/C GST.xlsx;data" `
             --add-data "data/I GST.xlsx;data" `
             main.py
