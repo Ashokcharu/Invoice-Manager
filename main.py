@@ -5550,8 +5550,8 @@ class InvoiceApp(QMainWindow):
         sheet.print_area = "A1:H51"
         sheet.page_margins.left = 0.2
         sheet.page_margins.right = 0.2
-        sheet.page_margins.top = 0.3
-        sheet.page_margins.bottom = 0.5
+        sheet.page_margins.top = 0.15 if sys.platform == "win32" else 0.3
+        sheet.page_margins.bottom = 0.2 if sys.platform == "win32" else 0.5
         sheet.print_options.horizontalCentered = True
         sheet.print_options.verticalCentered = False
         existing_merges = {str(cell_range) for cell_range in sheet.merged_cells.ranges}
@@ -5846,7 +5846,7 @@ class InvoiceApp(QMainWindow):
             max(1, len(textwrap.wrap(line, width=contact_width)))
             for line in phone_values.splitlines()
         ) or 1
-        sheet.row_dimensions[9].height = max(24, contact_lines * 17 + 13)
+        sheet.row_dimensions[9].height = max(24, contact_lines * 17 + 22)
         if document_kind == "INVOICE":
             for cell_range in (
                 "A43:B43", "C43:F43", "G43:H43",
@@ -5974,8 +5974,13 @@ class InvoiceApp(QMainWindow):
                 horizontal="center", vertical="center", wrap_text=True
             )
         sheet["A12"].alignment = Alignment(
-            horizontal="left", vertical="center", wrap_text=True
+            horizontal="left", vertical="center", wrap_text=True, indent=1
         )
+        for address in ("A11", "A14", "A15"):
+            sheet[address].alignment = Alignment(
+                horizontal="left", vertical="center", wrap_text=True,
+                indent=1,
+            )
         address_text = str(sheet["A12"].value or "")
         if address_text:
             merged_width = sum(
@@ -6102,7 +6107,9 @@ class InvoiceApp(QMainWindow):
             horizontal="left", vertical="center", wrap_text=False,
             shrink_to_fit=True,
         )
-        sheet["A48"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        sheet["A48"].alignment = Alignment(
+            horizontal="left", vertical="center", wrap_text=True, indent=1
+        )
         sheet.row_dimensions[34].height = 21
         sheet.row_dimensions[35].height = 4
         sheet.row_dimensions[41].height = 21
@@ -6127,7 +6134,8 @@ class InvoiceApp(QMainWindow):
                     horizontal="center", vertical="center", wrap_text=True
                 )
             sheet.cell(row, 2).alignment = Alignment(
-                horizontal="left", vertical="center", wrap_text=True
+                horizontal="left", vertical="center", wrap_text=True,
+                indent=1,
             )
         for address in (
             "G12", "G13", "G14", "F47", "F50",
@@ -6137,7 +6145,8 @@ class InvoiceApp(QMainWindow):
             )
         for address in ("E12", "E13", "E14"):
             sheet[address].alignment = Alignment(
-                horizontal="left", vertical="center", wrap_text=True
+                horizontal="left", vertical="center", wrap_text=True,
+                indent=1,
             )
         for address in ("A8",):
             sheet[address].alignment = Alignment(
@@ -6317,6 +6326,18 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[3].height = 32
         if len(items) >= 8:
             sheet["B25"].font = copy(sheet["B24"].font)
+        for row in sheet.iter_rows(
+            min_row=1, max_row=final_row, min_col=1, max_col=8
+        ):
+            for cell in row:
+                if not isinstance(cell.value, str) or not cell.value.strip():
+                    continue
+                alignment = copy(cell.alignment)
+                if alignment.horizontal in (None, "general"):
+                    alignment.horizontal = "left"
+                if alignment.horizontal in ("left", "right"):
+                    alignment.indent = 1
+                    cell.alignment = alignment
         return workbook
 
     def remove_moved_private_files(self):
