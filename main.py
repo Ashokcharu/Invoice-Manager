@@ -5548,8 +5548,8 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.fitToHeight = 1
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
-        sheet.page_margins.left = 0.3
-        sheet.page_margins.right = 0.3
+        sheet.page_margins.left = 0.2
+        sheet.page_margins.right = 0.2
         sheet.page_margins.top = 0.3
         sheet.page_margins.bottom = 0.5
         sheet.print_options.horizontalCentered = True
@@ -5833,7 +5833,7 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[6].height = 22
         sheet.row_dimensions[7].height = 22
         sheet.row_dimensions[8].height = max(
-            sheet.row_dimensions[8].height or 15, 34
+            sheet.row_dimensions[8].height or 15, 44
         )
         contact_width = max(
             24,
@@ -5846,7 +5846,7 @@ class InvoiceApp(QMainWindow):
             max(1, len(textwrap.wrap(line, width=contact_width)))
             for line in phone_values.splitlines()
         ) or 1
-        sheet.row_dimensions[9].height = max(24, contact_lines * 17 + 5)
+        sheet.row_dimensions[9].height = max(24, contact_lines * 17 + 13)
         if document_kind == "INVOICE":
             for cell_range in (
                 "A43:B43", "C43:F43", "G43:H43",
