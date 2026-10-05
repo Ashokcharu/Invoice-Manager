@@ -63,6 +63,7 @@ from PySide6.QtWidgets import (
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
+from openpyxl.worksheet.cell_range import CellRange
 from openpyxl.drawing.image import Image as SpreadsheetImage
 from openpyxl.drawing.spreadsheet_drawing import (
     AnchorMarker,
@@ -95,6 +96,7 @@ DB_PATH = DATA_DIR / "invoices.db"
 SIGNATURE_PATH = DATA_DIR / "invoice_signature.png"
 START_INVOICE_NUMBER = 101
 START_PRIVATE_INVOICE_NUMBER = 100001
+MAX_INVOICE_ITEMS = 100
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 INVOICE_DIR.mkdir(parents=True, exist_ok=True)
@@ -5108,11 +5110,11 @@ class InvoiceApp(QMainWindow):
 
     def add_item_row(self):
 
-        if self.items.rowCount() >= 10:
+        if self.items.rowCount() >= MAX_INVOICE_ITEMS:
             QMessageBox.information(
                 self,
                 "Item Limit",
-                "The invoice sheet supports up to 10 item rows."
+                f"An invoice can contain up to {MAX_INVOICE_ITEMS} item rows."
             )
             return
 
@@ -5545,7 +5547,7 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 1
+        sheet.page_setup.fitToHeight = 1 if len(items) <= 10 else 0
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
         sheet.page_margins.left = 0.2
@@ -6029,7 +6031,7 @@ class InvoiceApp(QMainWindow):
                 for line in item["description"].splitlines()
             ) or 1
             base_item_heights.append(max(28, wrapped_lines * 22))
-        for index, item in enumerate(items):
+        for index, item in enumerate(items[:10]):
             row = 18 + index
             sheet.row_dimensions[row].hidden = False
             sheet.cell(row, 1, index + 1)
@@ -6041,8 +6043,8 @@ class InvoiceApp(QMainWindow):
             sheet.cell(row, 8, float(item["amount"]))
             sheet.row_dimensions[row].height = base_item_heights[index]
         for row in range(18 + len(items), 28):
-            sheet.row_dimensions[row].height = 40
-            sheet.row_dimensions[row].hidden = True
+            sheet.row_dimensions[row].height = 28
+            sheet.row_dimensions[row].hidden = False
         sheet.row_dimensions[16].height = 23
 
         sheet["H28"] = float(subtotal)
@@ -6341,6 +6343,65 @@ class InvoiceApp(QMainWindow):
                 if alignment.horizontal in ("left", "right"):
                     alignment.indent = 1
                     cell.alignment = alignment
+        extra_item_count = max(0, len(items) - 10)
+        if extra_item_count:
+            shifted_merges = [
+                CellRange(str(cell_range))
+                for cell_range in sheet.merged_cells.ranges
+                if cell_range.min_row >= 28
+            ]
+            for cell_range in shifted_merges:
+                sheet.unmerge_cells(str(cell_range))
+
+            shifted_dimensions = {
+                int(row): copy(dimension)
+                for row, dimension in sheet.row_dimensions.items()
+                if int(row) >= 28
+            }
+            sheet.insert_rows(28, extra_item_count)
+            for row in shifted_dimensions:
+                del sheet.row_dimensions[row]
+            for old_row, dimension in shifted_dimensions.items():
+                new_row = old_row + extra_item_count
+                dimension.index = new_row
+                sheet.row_dimensions[new_row] = dimension
+
+            for cell_range in shifted_merges:
+                cell_range.min_row += extra_item_count
+                cell_range.max_row += extra_item_count
+                sheet.merge_cells(str(cell_range))
+
+            item_row_styles = [
+                copy(sheet.cell(27, column)._style)
+                for column in range(1, 9)
+            ]
+            for item_index, item in enumerate(items[10:], start=10):
+                row = 18 + item_index
+                for column, style in enumerate(item_row_styles, start=1):
+                    sheet.cell(row, column)._style = copy(style)
+                sheet.merge_cells(
+                    start_row=row, start_column=2, end_row=row, end_column=3
+                )
+                sheet.cell(row, 1, item_index + 1)
+                sheet.cell(row, 2, item["description"])
+                sheet.cell(row, 4, item["hsn"])
+                sheet.cell(row, 5, float(item["quantity"]))
+                sheet.cell(row, 6, float(item["rate"]))
+                sheet.cell(row, 7, item["per"])
+                sheet.cell(row, 8, float(item["amount"]))
+                sheet.row_dimensions[row].height = base_item_heights[item_index]
+                item_alignment = copy(sheet.cell(row, 2).alignment)
+                item_alignment.horizontal = "left"
+                item_alignment.vertical = "center"
+                item_alignment.wrap_text = True
+                item_alignment.indent = 1
+                sheet.cell(row, 2).alignment = item_alignment
+
+            for image in sheet._images:
+                if image.anchor._from.row >= 27:
+                    image.anchor._from.row += extra_item_count
+            sheet.print_area = f"A1:H{final_row + extra_item_count}"
+            sheet.print_title_rows = "16:16"
         return workbook
 
     def remove_moved_private_files(self):
