@@ -5545,7 +5545,7 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 1
+        sheet.page_setup.fitToHeight = 0 if sys.platform == "win32" else 1
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
         sheet.page_margins.left = 0.2
