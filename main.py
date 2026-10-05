@@ -5858,7 +5858,7 @@ class InvoiceApp(QMainWindow):
                         cell.alignment = Alignment(
                             horizontal="left", vertical="center", wrap_text=True
                         )
-            for header in ("A43", "C43", "G43"):
+            for header in ("C43", "G43"):
                 sheet[header].font = Font(
                     name="Arial", size=13, bold=True, color="FF000000"
                 )
@@ -5875,11 +5875,6 @@ class InvoiceApp(QMainWindow):
             )
             for address in ("C44", "C45", "C46"):
                 sheet[address].font = bank_details_font
-            bundles_font = Font(
-                name="Arial", size=9, bold=True, color="FF000000"
-            )
-            for address in ("A43", "A44", "A45"):
-                sheet[address].font = bundles_font
             for address in ("F47", "F50"):
                 sheet[address].alignment = Alignment(
                     horizontal="center", vertical="center", wrap_text=True
@@ -5891,8 +5886,8 @@ class InvoiceApp(QMainWindow):
             sheet.column_dimensions["B"].width = 46
             sheet.column_dimensions["C"].width = 20.99
             sheet.row_dimensions[47].height = 20
-            sheet.row_dimensions[48].height = 27
-            sheet.row_dimensions[49].height = 27
+            sheet.row_dimensions[48].height = 40
+            sheet.row_dimensions[49].height = 40
             sheet.row_dimensions[51].height = 21
             footer_side = Side(style="thin")
             footer_border = Border(
@@ -6112,8 +6107,8 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[35].height = 4
         sheet.row_dimensions[41].height = 21
         sheet.row_dimensions[42].height = 4
-        sheet.row_dimensions[48].height = 27
-        sheet.row_dimensions[49].height = 27
+        sheet.row_dimensions[48].height = 40
+        sheet.row_dimensions[49].height = 40
         sheet.row_dimensions[50].height = 45
         for row in (*range(1, 10), *range(28, 52)):
             if not sheet.row_dimensions[row].hidden:
@@ -6201,8 +6196,8 @@ class InvoiceApp(QMainWindow):
         if self.signature_image_path:
             signature = SpreadsheetImage(str(self.signature_image_path))
             signature_columns = ("F", "G", "H")
-            signature_width = 360
-            signature_height = 78
+            signature_width = 450
+            signature_height = 110
             scale = min(
                 signature_width / signature.width,
                 signature_height / signature.height,
@@ -6263,7 +6258,7 @@ class InvoiceApp(QMainWindow):
                 (sheet.row_dimensions[row].height or 15) * 96 / 72
                 for row in range(44, 47)
             )
-            qr_padding = 0
+            qr_padding = 10
             qr_max_size = min(
                 qr_cell_width - 2 * qr_padding,
                 int(qr_cell_height - 2 * qr_padding),
@@ -6316,9 +6311,10 @@ class InvoiceApp(QMainWindow):
                     larger_font.sz = (larger_font.sz or 10) + 2
                     cell.font = larger_font
         company_font = copy(sheet["A2"].font)
-        company_font.sz = 42
+        company_font.sz = 46
         sheet["A2"].font = company_font
-        sheet.row_dimensions[2].height = 54
+        sheet.row_dimensions[2].height = 62
+        sheet.row_dimensions[3].height = 32
         if len(items) >= 8:
             sheet["B25"].font = copy(sheet["B24"].font)
         return workbook
