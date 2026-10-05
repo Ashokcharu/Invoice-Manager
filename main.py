@@ -5548,12 +5548,12 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.fitToHeight = 1
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
-        sheet.page_margins.left = 0.5
-        sheet.page_margins.right = 0.5
-        sheet.page_margins.top = 0.5
+        sheet.page_margins.left = 0.3
+        sheet.page_margins.right = 0.3
+        sheet.page_margins.top = 0.3
         sheet.page_margins.bottom = 0.5
         sheet.print_options.horizontalCentered = True
-        sheet.print_options.verticalCentered = True
+        sheet.print_options.verticalCentered = False
         existing_merges = {str(cell_range) for cell_range in sheet.merged_cells.ranges}
         for merge_range in (
             "A8:H8", "A8:D8", "E8:H8",
@@ -5571,7 +5571,7 @@ class InvoiceApp(QMainWindow):
                 bottom=current_border.bottom,
             )
         for merge_range in (
-            "A8:D8", "E8:H8", "A9:D9", "F9:H9",
+            "A8:H8", "A9:H9",
         ):
             sheet.merge_cells(merge_range)
             existing_merges.add(merge_range)
@@ -5603,8 +5603,8 @@ class InvoiceApp(QMainWindow):
                     sheet.unmerge_cells(merge_range)
                     existing_merges.remove(merge_range)
             for merge_range in (
-                "A43:C43", "A44:C44", "A45:C45", "D43:F43",
-                "D44:F44", "D45:F45", "D46:F46", "G43:H43",
+                "A43:B43", "A44:B44", "A45:B45", "C43:F43",
+                "C44:F44", "C45:F45", "C46:F46", "G43:H43",
                 "G44:G46", "A47:C47", "A48:E49", "F47:H47",
                 "F48:H49", "F50:H50", "A51:H51",
             ):
@@ -5633,9 +5633,13 @@ class InvoiceApp(QMainWindow):
             *(f"B{row}:C{row}" for row in range(23, 26)),
             "E12:F12", "G12:H12", "E13:F13", "G13:H13",
             "E14:F14", "G14:H14",
-            "A34:H34", "A35:H35", "A41:H41", "A42:H42",
+            "A34:H34", "A35:H35", "A36:B37", "A41:H41", "A42:H42",
             "A44:C44", "A45:C45", "A47:C47", "A48:E49", "A51:H51",
         ):
+            if document_kind == "INVOICE" and merge_range in (
+                "A44:C44", "A45:C45"
+            ):
+                continue
             if document_kind == "QUOTATION" and merge_range in (
                 "A47:C47", "A48:E49", "A51:H51"
             ):
@@ -5650,12 +5654,7 @@ class InvoiceApp(QMainWindow):
         website_text = self.seller_website.text().strip()
         if website_text and not website_text.lower().startswith("website:"):
             website_text = f"Website: {website_text}"
-        seller_state_text = re.sub(
-            r"\s+(?=CODE\s*:)",
-            "\n",
-            self.seller_state.text().strip(),
-            flags=re.IGNORECASE,
-        )
+        seller_state_text = re.sub(r"\s+", " ", self.seller_state.text().strip())
         website_phone = self.seller_phone.text().strip()
         phone_numbers = []
         for phone in re.findall(
@@ -5707,12 +5706,10 @@ class InvoiceApp(QMainWindow):
             "A3": self.seller_business.text(),
             "A4": self.seller_address_1.text(),
             "A5": self.seller_address_2.text(),
-            "A6": f"GSTIN :{self.seller_gstin.text()}",
+            "A6": f"GSTIN: {self.seller_gstin.text()}",
             "A7": seller_state_text,
-            "A8": website_text,
-            "A9": email_text,
-            "E9": phone_label,
-            "F9": phone_values,
+            "A8": "\n".join(text for text in (website_text, email_text) if text),
+            "A9": f"{phone_label} {phone_values}".strip(),
             "A10": "BUYER DETAILS",
             "E10": f"{self.document_kind.currentText().upper()} DETAILS",
             "A11": self.customer_name.text(),
@@ -5753,7 +5750,7 @@ class InvoiceApp(QMainWindow):
         }
         if document_kind == "INVOICE":
             for address in (
-                "F44", "F45", "D44", "D45", "F46", "D46", "F47", "F50",
+                "F44", "F45", "D43", "D44", "D45", "F46", "D46", "F47", "F50",
                 "A47", "A48", "A44", "A45",
             ):
                 values.pop(address, None)
@@ -5761,10 +5758,10 @@ class InvoiceApp(QMainWindow):
                 "A43": "BUNDLES / THROUGH",
                 "A44": f"NO OF BUNDLE'S: {self.bundle_count.text()}",
                 "A45": f"THROUGH: {self.through.text()}",
-                "D43": "BANK DETAILS",
-                "D44": f"Bank Name: {self.bank_name.text()}",
-                "D45": f"A/C No: {self.bank_account.text()}",
-                "D46": f"IFSC: {self.bank_ifsc.text()}",
+                "C43": "BANK DETAILS",
+                "C44": f"Bank Name: {self.bank_name.text()}",
+                "C45": f"A/C No: {self.bank_account.text()}",
+                "C46": f"IFSC: {self.bank_ifsc.text()}",
                 "G43": "PAYMENT SUMMARY",
                 "H44": (
                     "PAID IN FULL"
@@ -5833,48 +5830,56 @@ class InvoiceApp(QMainWindow):
         for row in range(3, 8):
             current_height = sheet.row_dimensions[row].height or 15
             sheet.row_dimensions[row].height = round(current_height * 1.1, 1)
-        sheet.row_dimensions[7].height = max(
-            sheet.row_dimensions[7].height or 15,
-            len(seller_state_text.splitlines()) * 18 + 6,
-        )
+        sheet.row_dimensions[6].height = 22
+        sheet.row_dimensions[7].height = 22
         sheet.row_dimensions[8].height = max(
-            sheet.row_dimensions[8].height or 15, 26
+            sheet.row_dimensions[8].height or 15, 34
         )
         contact_width = max(
             24,
             int(sum(
                 sheet.column_dimensions[column].width or 8.43
-                for column in "FGH"
+                for column in "ABCDEFGH"
             ) * 0.85),
         )
         contact_lines = sum(
             max(1, len(textwrap.wrap(line, width=contact_width)))
             for line in phone_values.splitlines()
         ) or 1
-        sheet.row_dimensions[9].height = max(30, contact_lines * 18 + 8)
+        sheet.row_dimensions[9].height = max(24, contact_lines * 17 + 5)
         if document_kind == "INVOICE":
             for cell_range in (
-                "A43:C43", "D43:F43", "G43:H43",
-                "A44:C44", "A45:C45", "D44:F44", "D45:F45",
-                "D46:F46", "H44:H46", "A47:C47", "A48:E49",
+                "A43:B43", "C43:F43", "G43:H43",
+                "A44:B44", "A45:B45", "C44:F44", "C45:F45",
+                "C46:F46", "H44:H46", "A47:C47", "A48:E49",
             ):
                 for row_cells in sheet[cell_range]:
                     for cell in row_cells:
                         cell.alignment = Alignment(
                             horizontal="left", vertical="center", wrap_text=True
                         )
-            for header in ("A43", "D43", "G43"):
+            for header in ("A43", "C43", "G43"):
                 sheet[header].font = Font(
-                    name="Arial", size=10, bold=True, color="FF000000"
+                    name="Arial", size=13, bold=True, color="FF000000"
                 )
                 sheet[header].alignment = Alignment(
                     horizontal="center", vertical="center", wrap_text=True
                 )
             payment_summary_font = Font(
-                name="Arial", size=10, bold=True, color="FF000000"
+                name="Arial", size=12, bold=True, color="FF000000"
             )
             for address in ("H44", "H45", "H46"):
                 sheet[address].font = payment_summary_font
+            bank_details_font = Font(
+                name="Arial", size=14, bold=True, color="FF000000"
+            )
+            for address in ("C44", "C45", "C46"):
+                sheet[address].font = bank_details_font
+            bundles_font = Font(
+                name="Arial", size=9, bold=True, color="FF000000"
+            )
+            for address in ("A43", "A44", "A45"):
+                sheet[address].font = bundles_font
             for address in ("F47", "F50"):
                 sheet[address].alignment = Alignment(
                     horizontal="center", vertical="center", wrap_text=True
@@ -5883,6 +5888,8 @@ class InvoiceApp(QMainWindow):
                 sheet.row_dimensions[row].height = 32
             sheet.column_dimensions["G"].width = 16
             sheet.column_dimensions["H"].width = 30
+            sheet.column_dimensions["B"].width = 46
+            sheet.column_dimensions["C"].width = 20.99
             sheet.row_dimensions[47].height = 20
             sheet.row_dimensions[48].height = 27
             sheet.row_dimensions[49].height = 27
@@ -5901,7 +5908,7 @@ class InvoiceApp(QMainWindow):
                 bottom=Side(),
             )
             for address in (
-                "A43", "D43", "G43", "A44", "A45", "D44", "D45", "D46",
+                "A43", "C43", "G43", "A44", "A45", "C44", "C45", "C46",
                 "G44", "H44", "H45", "H46", "A47", "A48",
             ):
                 sheet[address].border = footer_border
@@ -5961,7 +5968,7 @@ class InvoiceApp(QMainWindow):
             for row in range(43, 47):
                 for column in range(1, 9):
                     sheet.cell(row, column).border = footer_border
-            for column in range(1, 4):
+            for column in range(1, 3):
                 sheet.cell(46, column).border = Border(
                     left=Side(),
                     right=Side(),
@@ -5999,8 +6006,14 @@ class InvoiceApp(QMainWindow):
         for row in range(10, 16):
             current_height = sheet.row_dimensions[row].height or 15
             sheet.row_dimensions[row].height = round(current_height * 1.25, 1)
-        sheet[f"A{amount_label_row}"] = "Amount Chargeable (in words) :"
-        sheet[f"A{amount_words_row}"] = amount_to_words(total)
+        sheet[f"A{amount_label_row}"] = (
+            f"Amount Chargeable (in words): {amount_to_words(total)}"
+        )
+        sheet[f"A{amount_words_row}"] = None
+        sheet[f"A{amount_label_row}"].alignment = Alignment(
+            horizontal="left", vertical="center", wrap_text=False,
+            shrink_to_fit=True,
+        )
         jurisdiction_cell = "A51"
         sheet[jurisdiction_cell].alignment = Alignment(
             horizontal="left", vertical="center", wrap_text=False
@@ -6011,10 +6024,10 @@ class InvoiceApp(QMainWindow):
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
-                max(1, len(textwrap.wrap(line, width=52, break_long_words=True)))
+            max(1, len(textwrap.wrap(line, width=44, break_long_words=True)))
                 for line in item["description"].splitlines()
             ) or 1
-            base_item_heights.append(max(38, wrapped_lines * 26))
+            base_item_heights.append(max(28, wrapped_lines * 22))
         for index, item in enumerate(items):
             row = 18 + index
             sheet.cell(row, 1, index + 1)
@@ -6026,13 +6039,8 @@ class InvoiceApp(QMainWindow):
             sheet.cell(row, 8, float(item["amount"]))
             sheet.row_dimensions[row].height = base_item_heights[index]
         for row in range(18 + len(items), 28):
-            sheet.row_dimensions[row].height = 26
-        for row in range(16, 28):
-            current_height = sheet.row_dimensions[row].height or 15
-            sheet.row_dimensions[row].height = round(current_height * 1.25, 1)
-            sheet.row_dimensions[row].height = round(
-                sheet.row_dimensions[row].height * 1.1, 1
-            )
+            sheet.row_dimensions[row].height = 40
+        sheet.row_dimensions[16].height = 23
 
         sheet["H28"] = float(subtotal)
         tax_rate = self.gst_rate.value()
@@ -6057,8 +6065,10 @@ class InvoiceApp(QMainWindow):
             sheet.cell(tax_total_row, 3, float(subtotal))
             sheet.cell(tax_total_row, 5, float(gst))
             sheet.cell(tax_total_row, 8, float(gst))
-            sheet[f"A{tax_words_row}"] = "Tax Amount (in words) :"
-            sheet[f"A{tax_words_row + 1}"] = amount_to_words(gst)
+            sheet[f"A{tax_words_row}"] = (
+                f"Tax Amount (words): {amount_to_words(gst)}"
+            )
+            sheet[f"A{tax_words_row + 1}"] = None
         else:
             sheet["B29"] = "CGST"
             sheet["H29"] = float(cgst)
@@ -6087,15 +6097,21 @@ class InvoiceApp(QMainWindow):
             sheet.cell(tax_total_row, 5, float(cgst))
             sheet.cell(tax_total_row, 7, float(sgst))
             sheet.cell(tax_total_row, 8, float(gst))
-            sheet[f"A{tax_words_row}"] = "Tax Amount (in words) :"
-            sheet[f"A{tax_words_row + 1}"] = amount_to_words(gst)
+            sheet[f"A{tax_words_row}"] = (
+                f"Tax Amount (words): {amount_to_words(gst)}"
+            )
+            sheet[f"A{tax_words_row + 1}"] = None
 
         sheet[f"D{eoe_row}"] = "E. & O.E"
-        sheet["A35"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        sheet["A42"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        sheet["A41"].alignment = Alignment(
+            horizontal="left", vertical="center", wrap_text=False,
+            shrink_to_fit=True,
+        )
         sheet["A48"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        sheet.row_dimensions[35].height = 27
-        sheet.row_dimensions[42].height = 27
+        sheet.row_dimensions[34].height = 21
+        sheet.row_dimensions[35].height = 4
+        sheet.row_dimensions[41].height = 21
+        sheet.row_dimensions[42].height = 4
         sheet.row_dimensions[48].height = 27
         sheet.row_dimensions[49].height = 27
         sheet.row_dimensions[50].height = 45
@@ -6133,15 +6149,13 @@ class InvoiceApp(QMainWindow):
                 horizontal="center", vertical="center", wrap_text=True
             )
         sheet["A9"].alignment = Alignment(
-            horizontal="center", vertical="top", wrap_text=True
-        )
-        sheet["E9"].alignment = Alignment(
             horizontal="right", vertical="top", wrap_text=True
         )
-        sheet["F9"].alignment = Alignment(
-            horizontal="left", vertical="top", wrap_text=True
+        bank_value_addresses = (
+            ("C44", "C45", "C46")
+            if document_kind == "INVOICE" else ("F44", "F45", "F46")
         )
-        for address in ("F44", "F45", "F46"):
+        for address in bank_value_addresses:
             sheet[address].alignment = Alignment(
                 horizontal="left", vertical="center", wrap_text=True
             )
@@ -6181,7 +6195,7 @@ class InvoiceApp(QMainWindow):
                     bottom=thin_side,
                 )
         for row in range(44, 47):
-            for column in ("D", "F"):
+            for column in (("C", "F") if document_kind == "INVOICE" else ("D", "F")):
                 sheet[f"{column}{row}"].border = bank_cell_border
 
         if self.signature_image_path:
@@ -6261,9 +6275,7 @@ class InvoiceApp(QMainWindow):
             )
             payment_qr.width = max(1, int(payment_qr.width * scale))
             payment_qr.height = max(1, int(payment_qr.height * scale))
-            qr_left_offset = max(
-                0, (qr_cell_width - payment_qr.width) // 2 + 16
-            )
+            qr_left_offset = max(0, (qr_cell_width - payment_qr.width) // 2)
             qr_top_offset = max(
                 0, int((qr_cell_height - payment_qr.height) / 2)
             )
@@ -6281,7 +6293,7 @@ class InvoiceApp(QMainWindow):
             )
             sheet.add_image(payment_qr)
 
-        uniform_border_side = Side(style="thin", color="FF000000")
+        uniform_border_side = Side(style="medium", color="FF000000")
         final_row = 55 if document_kind == "QUOTATION" else 51
         for row in sheet.iter_rows(min_row=1, max_row=final_row, min_col=1, max_col=8):
             for cell in row:
@@ -6301,14 +6313,14 @@ class InvoiceApp(QMainWindow):
             for cell in row:
                 if cell.value is not None:
                     larger_font = copy(cell.font)
-                    larger_font.sz = (larger_font.sz or 10) + 1
+                    larger_font.sz = (larger_font.sz or 10) + 2
                     cell.font = larger_font
+        company_font = copy(sheet["A2"].font)
+        company_font.sz = 42
+        sheet["A2"].font = company_font
+        sheet.row_dimensions[2].height = 54
         if len(items) >= 8:
             sheet["B25"].font = copy(sheet["B24"].font)
-        phone_font = copy(sheet["A9"].font)
-        phone_font.color = copy(sheet["A9"].font.color)
-        sheet["E9"].font = phone_font
-        sheet["F9"].font = copy(phone_font)
         return workbook
 
     def remove_moved_private_files(self):
