@@ -45,6 +45,14 @@ jobs:
           $year = Get-Date -Format "yyyy"
           $month = Get-Date -Format "MMMM"
           $folders = @(
+            "dist/AdoodsInvoice/_internal/data/workbooks",
+            "dist/AdoodsInvoice/_internal/invoices/Invoices/PDF",
+            "dist/AdoodsInvoice/_internal/invoices/Private/Invoices/PDF",
+            "dist/AdoodsInvoice/_internal/invoices/Quotations/PDF",
+            "dist/AdoodsInvoice/_internal/invoices/Invoices/XLSX",
+            "dist/AdoodsInvoice/_internal/invoices/Private/Invoices/XLSX",
+            "dist/AdoodsInvoice/_internal/invoices/Quotations/XLSX",
+            "dist/AdoodsInvoice/_internal/invoices/QR",
             "dist/AdoodsInvoice/invoices/Invoices_PDF_$year/$month",
             "dist/AdoodsInvoice/invoices/Private_PDF_$year/$month",
             "dist/AdoodsInvoice/invoices/Quotation_PDF_$year/$month"

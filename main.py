@@ -76,15 +76,16 @@ import qrcode
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-APP_DIR = (
-    Path(sys.executable).resolve().parent
-    if IS_FROZEN else Path(__file__).resolve().parent
-)
+APP_DIR = BUNDLE_DIR if IS_FROZEN else Path(__file__).resolve().parent
 RESOURCE_DIR = BUNDLE_DIR
 
 DATA_DIR = APP_DIR / "data"
 INVOICE_DIR = APP_DIR / "invoices"
 PRIVATE_INVOICE_DIR = INVOICE_DIR / "Private"
+EXTERNAL_PDF_DIR = (
+    Path(sys.executable).resolve().parent / "invoices"
+    if IS_FROZEN and sys.platform == "win32" else None
+)
 TEMPLATE_DIR = RESOURCE_DIR / "data"
 
 DB_PATH = DATA_DIR / "invoices.db"
@@ -92,8 +93,8 @@ SIGNATURE_PATH = DATA_DIR / "invoice_signature.png"
 START_INVOICE_NUMBER = 101
 START_PRIVATE_INVOICE_NUMBER = 100001
 
-DATA_DIR.mkdir(exist_ok=True)
-INVOICE_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+INVOICE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -797,13 +798,18 @@ class InvoiceApp(QMainWindow):
                     pdf_path TEXT NOT NULL,
                     qr_path TEXT NOT NULL DEFAULT '',
                     payment_update_path TEXT NOT NULL DEFAULT '',
-                    final_pdf_path TEXT NOT NULL DEFAULT ''
+                    final_pdf_path TEXT NOT NULL DEFAULT '',
+                    paid_total_at_request REAL
                 )
                 """
             )
             request_columns = {
                 row[1] for row in con.execute("PRAGMA table_info(invoice_requests)")
             }
+            if "paid_total_at_request" not in request_columns:
+                con.execute(
+                    "ALTER TABLE invoice_requests ADD COLUMN paid_total_at_request REAL"
+                )
             if "payment_update_path" not in request_columns:
                 con.execute(
                     "ALTER TABLE invoice_requests ADD COLUMN "
@@ -1252,21 +1258,45 @@ class InvoiceApp(QMainWindow):
         document_folder = document_folder_for_selection(
             document_kind_selection_for_kind(document_kind)
         )
-        if IS_FROZEN and sys.platform == "win32":
-            if document_kind == "QUOTATION":
-                series_folder = "Quotation"
-            elif self.private_invoice_checkbox.isChecked():
-                series_folder = "Private"
-            else:
-                series_folder = "Invoices"
-            pdf_root = self.custom_output_dir or INVOICE_DIR
-            return (
-                pdf_root / f"{series_folder}_PDF_{invoice_date.year}"
-                / invoice_date.strftime("%B")
-            )
         return (
             document_root / document_folder / "PDF" / str(invoice_date.year)
         )
+
+
+    def external_final_pdf_path(
+        self, document_kind, invoice_no, invoice_date, filename
+    ):
+
+        if EXTERNAL_PDF_DIR is None:
+            return None
+        if document_kind == "QUOTATION":
+            series_folder = "Quotation"
+        elif self.private_invoice_checkbox.isChecked():
+            series_folder = "Private"
+        else:
+            series_folder = "Invoices"
+        return (
+            EXTERNAL_PDF_DIR / f"{series_folder}_PDF_{invoice_date.year}"
+            / invoice_date.strftime("%B") / filename
+        )
+
+
+    def mirror_external_final_pdf(
+        self, source_pdf, document_kind, invoice_no, invoice_date
+    ):
+
+        destination = self.external_final_pdf_path(
+            document_kind, invoice_no, invoice_date, Path(source_pdf).name
+        )
+        if destination is None:
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_pdf, destination)
+        prefix = "QTN" if document_kind == "QUOTATION" else "INV"
+        filename_pattern = f"{prefix}-{invoice_no:04d}_*.pdf"
+        for old_pdf in EXTERNAL_PDF_DIR.rglob(filename_pattern):
+            if old_pdf.resolve() != destination.resolve():
+                old_pdf.unlink(missing_ok=True)
 
 
     def quotation_payment_qr_path(self, invoice_no, invoice_date, grand_total=None):
@@ -3876,31 +3906,6 @@ class InvoiceApp(QMainWindow):
             return
 
         invoice_no = int(self.invoice_no.text())
-        with sqlite3.connect(DB_PATH) as con:
-            invoice = con.execute(
-                "SELECT grand_total, customer_name FROM invoices "
-                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
-                (invoice_no,),
-            ).fetchone()
-            paid_total = con.execute(
-                "SELECT COALESCE(SUM(amount), 0) FROM invoice_payments "
-                "WHERE invoice_no = ? AND document_kind = 'INVOICE'",
-                (invoice_no,),
-            ).fetchone()[0]
-        if not invoice:
-            QMessageBox.warning(
-                self, "Invoice Missing", "This invoice could not be found."
-            )
-            return
-
-        invoice_total = money(invoice[0] or 0)
-        paid_total = money(paid_total)
-        balance_due = max(Decimal("0.00"), invoice_total - paid_total)
-        received_percent = (
-            paid_total / invoice_total * 100
-            if invoice_total > 0 else Decimal("0")
-        )
-
         mobile = normalize_indian_mobile(self.customer_mobile.text())
         if not mobile:
             QMessageBox.warning(
@@ -3910,30 +3915,15 @@ class InvoiceApp(QMainWindow):
             )
             return
 
-        message = "\n".join((
-            f"Hello {invoice[1] or 'Customer'},",
-            "",
-            f"Thank you for choosing {self.seller_name.text()} for your garments order.",
-            f"Please find attached invoice {invoice_no} for your records.",
-            "",
-            f"Invoice total: INR {invoice_total:.2f}",
-            f"Received: INR {money(paid_total):.2f}",
-            f"Payment status: {format(received_percent.normalize(), 'f')}% paid",
-            f"Balance due: INR {balance_due:.2f}",
-            "",
-            "We appreciate your business.",
-            "Regards,",
-            self.seller_name.text(),
-        ))
         mime_data = QMimeData()
         mime_data.setUrls([QUrl.fromLocalFile(str(pdf_path.resolve()))])
         QApplication.clipboard().setMimeData(mime_data)
-        opened = self.open_whatsapp_chat(mobile, message)
+        opened = self.open_whatsapp_chat(mobile)
         if opened:
             QMessageBox.information(
                 self,
                 "Attach Invoice PDF",
-                f"The invoice PDF is copied. Paste it into the WhatsApp chat (Ctrl+V):\n\n{pdf_path.name}",
+                f"The PDF is copied. Paste it into the WhatsApp chat (Ctrl+V):\n\n{pdf_path.name}",
             )
         else:
             QMessageBox.warning(
@@ -4208,14 +4198,15 @@ class InvoiceApp(QMainWindow):
         return True
 
 
-    def open_whatsapp_chat(self, mobile, message):
+    def open_whatsapp_chat(self, mobile, message=None):
 
-        whatsapp_web_url = QUrl(
-            f"https://web.whatsapp.com/send?phone={mobile}&text={quote(message)}"
-        )
-        whatsapp_url = QUrl(
-            f"whatsapp://send?phone={mobile}&text={quote(message)}"
-        )
+        web_url = f"https://web.whatsapp.com/send?phone={mobile}"
+        app_url = f"whatsapp://send?phone={mobile}"
+        if message:
+            web_url += f"&text={quote(message)}"
+            app_url += f"&text={quote(message)}"
+        whatsapp_web_url = QUrl(web_url)
+        whatsapp_url = QUrl(app_url)
         if sys.platform == "win32":
             try:
                 import winreg
@@ -4828,6 +4819,26 @@ class InvoiceApp(QMainWindow):
                 f"Enter a valid {document_name.lower()} number before sharing.",
             )
             return
+        if is_invoice:
+            with sqlite3.connect(DB_PATH) as con:
+                existing_request = con.execute(
+                    """
+                    SELECT 1 FROM invoice_requests
+                    WHERE invoice_no = ?
+                      AND ROUND(paid_total_at_request, 2) = ROUND(?, 2)
+                    LIMIT 1
+                    """,
+                    (invoice_no, float(paid_total)),
+                ).fetchone()
+            if existing_request:
+                QMessageBox.information(
+                    self,
+                    "Request Already Created",
+                    "A payment request PDF already exists for the current "
+                    "receipt total. Record another payment before creating "
+                    "the next request PDF.",
+                )
+                return
         if not self.save_document_bundle(show_dialog=False):
             QMessageBox.warning(
                 self,
@@ -4899,8 +4910,8 @@ class InvoiceApp(QMainWindow):
                     """
                     INSERT INTO invoice_requests (
                         invoice_no, requested_at, request_percent, request_amount,
-                        pdf_path, qr_path
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        pdf_path, qr_path, paid_total_at_request
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         invoice_no,
@@ -4909,6 +4920,7 @@ class InvoiceApp(QMainWindow):
                         float(request_amount),
                         str(snapshot_pdf_path),
                         str(snapshot_qr_path or ""),
+                        float(paid_total),
                     ),
                 )
             if not self.sync_invoice_request_pdfs(invoice_no):
@@ -5792,8 +5804,28 @@ class InvoiceApp(QMainWindow):
         sheet["A12"].alignment = Alignment(
             horizontal="left", vertical="center", wrap_text=True
         )
-        if self.customer_address_2.text().strip():
-            sheet.row_dimensions[12].height = 30
+        address_text = str(sheet["A12"].value or "")
+        if address_text:
+            merged_width = sum(
+                sheet.column_dimensions[column].width or 8.43
+                for column in "ABCD"
+            )
+            line_capacity = max(20, int(merged_width * 0.9))
+            wrapped_address_lines = sum(
+                max(
+                    1,
+                    len(textwrap.wrap(
+                        line,
+                        width=line_capacity,
+                        break_long_words=True,
+                        break_on_hyphens=True,
+                    )),
+                )
+                for line in address_text.splitlines()
+            )
+            sheet.row_dimensions[12].height = max(
+                30, wrapped_address_lines * 15 + 6
+            )
         sheet[f"A{amount_label_row}"] = "Amount Chargeable (in words) :"
         sheet[f"A{amount_words_row}"] = amount_to_words(total)
         jurisdiction_cell = "A51"
@@ -6554,6 +6586,10 @@ class InvoiceApp(QMainWindow):
                     )
 
                 )
+
+            self.mirror_external_final_pdf(
+                generated_pdf, document_kind, invoice_no, invoice_date
+            )
 
             if document_kind == "INVOICE":
                 self.refresh_invoice_request_history()

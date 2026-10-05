@@ -44,9 +44,10 @@ Install LibreOffice through your Linux distribution's package manager before exp
 
 ## Data and Output
 
-- The local SQLite database and signature image are stored in `data/`. In Windows builds, editable XLSX workbooks are stored under `data/workbooks/` beside the executable.
-- Active PDFs are stored under `invoices/`. Windows executable builds use `Invoices_PDF_YYYY/Month`, `Private_PDF_YYYY/Month`, or `Quotation_PDF_YYYY/Month` (for example, `Invoices_PDF_2026/October/`); regular runs keep the existing year-only folders. Saving or recording a payment replaces the active PDF at that path.
-- Payment-request snapshots and updated request PDFs are kept in a `Requests/` subfolder beside the active monthly PDF. A duplicate paid-invoice PDF is not created there.
+- The local SQLite database, signature, working invoice files, scans, and editable XLSX workbooks are stored under PyInstaller's `_internal/data/` and `_internal/invoices/` folders in Windows builds.
+- Windows keeps one latest/final PDF copy outside `_internal`: `invoices/Invoices_PDF_YYYY/Month`, `invoices/Private_PDF_YYYY/Month`, or `invoices/Quotation_PDF_YYYY/Month`. Saving or recording a payment replaces that outside copy.
+- Payment-request snapshots and updated request PDFs remain in the working invoice tree under `_internal/invoices/.../Requests/`; they are not duplicated outside `_internal`.
+- Regular (non-frozen) runs keep their existing year-only invoice output folders.
 - Generated invoice folders are excluded by `.gitignore`.
 
 **Before publishing this repository on GitHub, review `data/invoices.db` and `data/invoice_signature.png`.** They may contain customer, payment, seller, or signature information. Remove sensitive files from version control and Git history before making the repository public; adding them to `.gitignore` alone does not remove files already tracked by Git.
