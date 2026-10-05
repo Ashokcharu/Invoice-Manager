@@ -5545,7 +5545,7 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 0 if sys.platform == "win32" else 1
+        sheet.page_setup.fitToHeight = 1
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
         sheet.page_margins.left = 0.2
@@ -5635,6 +5635,7 @@ class InvoiceApp(QMainWindow):
             "E14:F14", "G14:H14",
             "A34:H34", "A35:H35", "A36:B37", "A41:H41", "A42:H42",
             "A44:C44", "A45:C45", "A47:C47", "A48:E49", "A51:H51",
+            "A14:D14",
         ):
             if document_kind == "INVOICE" and merge_range in (
                 "A44:C44", "A45:C45"
@@ -6030,6 +6031,7 @@ class InvoiceApp(QMainWindow):
             base_item_heights.append(max(28, wrapped_lines * 22))
         for index, item in enumerate(items):
             row = 18 + index
+            sheet.row_dimensions[row].hidden = False
             sheet.cell(row, 1, index + 1)
             sheet.cell(row, 2, item["description"])
             sheet.cell(row, 4, item["hsn"])
@@ -6040,6 +6042,7 @@ class InvoiceApp(QMainWindow):
             sheet.row_dimensions[row].height = base_item_heights[index]
         for row in range(18 + len(items), 28):
             sheet.row_dimensions[row].height = 40
+            sheet.row_dimensions[row].hidden = True
         sheet.row_dimensions[16].height = 23
 
         sheet["H28"] = float(subtotal)
