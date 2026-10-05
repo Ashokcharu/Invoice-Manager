@@ -23,7 +23,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller pillow
+
+      - name: Create Windows EXE icon from PNG
+        shell: pwsh
+        run: |
+          python -c "from PIL import Image; image=Image.open('data/icon.png').convert('RGBA'); side=max(image.size); canvas=Image.new('RGBA',(side,side),(0,0,0,0)); canvas.alpha_composite(image,((side-image.width)//2,(side-image.height)//2)); canvas.save('app_build.ico',format='ICO',sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 
       - name: Build EXE
         run: |
@@ -33,10 +38,10 @@ jobs:
             --windowed `
             --onedir `
             --name AdoodsInvoice `
-            --icon app.ico `
-            --add-data "app.ico;." `
+            --icon app_build.ico `
             --add-data "data/C GST.xlsx;data" `
             --add-data "data/I GST.xlsx;data" `
+            --add-data "data/icon.png;data" `
             main.py
 
       - name: Prepare PDF output folders

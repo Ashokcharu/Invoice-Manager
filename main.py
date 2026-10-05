@@ -383,7 +383,10 @@ class InvoiceApp(QMainWindow):
         self.private_move_cancelled = False
         self.active_document_kind = None
         self.setWindowTitle("Invoice Manager")
-        self.setWindowIcon(QIcon(str(RESOURCE_DIR / "app.ico")))
+        window_icon_path = TEMPLATE_DIR / "icon.png"
+        if not window_icon_path.is_file():
+            window_icon_path = RESOURCE_DIR / "app.ico"
+        self.setWindowIcon(QIcon(str(window_icon_path)))
         self.resize(1280, 820)
         self.setMinimumSize(1050, 700)
 
@@ -4819,26 +4822,32 @@ class InvoiceApp(QMainWindow):
                 f"Enter a valid {document_name.lower()} number before sharing.",
             )
             return
+        existing_request = None
         if is_invoice:
-            with sqlite3.connect(DB_PATH) as con:
-                existing_request = con.execute(
-                    """
-                    SELECT 1 FROM invoice_requests
-                    WHERE invoice_no = ?
-                      AND ROUND(paid_total_at_request, 2) = ROUND(?, 2)
-                    LIMIT 1
-                    """,
-                    (invoice_no, float(paid_total)),
-                ).fetchone()
-            if existing_request:
-                QMessageBox.information(
-                    self,
-                    "Request Already Created",
-                    "A payment request PDF already exists for the current "
-                    "receipt total. Record another payment before creating "
-                    "the next request PDF.",
-                )
-                return
+                        with sqlite3.connect(DB_PATH) as con:
+                                existing_request = con.execute(
+                                        """
+                                        SELECT r.id, r.pdf_path, r.qr_path
+                                        FROM invoice_requests AS r
+                                        WHERE r.invoice_no = ?
+                                            AND (
+                                                ROUND(r.paid_total_at_request, 2) = ROUND(?, 2)
+                                                OR (
+                                                    r.paid_total_at_request IS NULL
+                                                    AND ROUND((
+                                                        SELECT COALESCE(SUM(p.amount), 0)
+                                                        FROM invoice_payments AS p
+                                                        WHERE p.invoice_no = r.invoice_no
+                                                            AND p.document_kind = 'INVOICE'
+                                                            AND datetime(p.created_at) <= datetime(r.requested_at)
+                                                    ), 2) = ROUND(?, 2)
+                                                )
+                                            )
+                                        ORDER BY r.requested_at DESC, r.id DESC
+                                        LIMIT 1
+                                        """,
+                                        (invoice_no, float(paid_total), float(paid_total)),
+                                ).fetchone()
         if not self.save_document_bundle(show_dialog=False):
             QMessageBox.warning(
                 self,
@@ -4895,34 +4904,64 @@ class InvoiceApp(QMainWindow):
             timestamp = request_time.strftime("%Y%m%d_%H%M%S_%f")
             request_folder = Path(pdf_path).parent / "Requests"
             request_folder.mkdir(parents=True, exist_ok=True)
-            snapshot_pdf_path = request_folder / (
-                f"{Path(pdf_path).stem}_REQUEST_{timestamp}.pdf"
-            )
+            if existing_request:
+                request_id, previous_request_pdf, previous_request_qr = existing_request
+                snapshot_pdf_path = Path(previous_request_pdf)
+            else:
+                request_id = None
+                previous_request_qr = ""
+                snapshot_pdf_path = request_folder / (
+                    f"{Path(pdf_path).stem}_REQUEST_{timestamp}.pdf"
+                )
             shutil.copy2(pdf_path, snapshot_pdf_path)
             snapshot_qr_path = None
             if qr_path and qr_path.is_file():
-                snapshot_qr_path = request_folder / (
-                    f"{Path(pdf_path).stem}_REQUEST_{timestamp}_QR.png"
+                snapshot_qr_path = (
+                    Path(previous_request_qr)
+                    if previous_request_qr else request_folder / (
+                        f"{Path(pdf_path).stem}_REQUEST_{timestamp}_QR.png"
+                    )
                 )
                 shutil.copy2(qr_path, snapshot_qr_path)
+            elif previous_request_qr:
+                Path(previous_request_qr).unlink(missing_ok=True)
             with sqlite3.connect(DB_PATH) as con:
-                con.execute(
-                    """
-                    INSERT INTO invoice_requests (
-                        invoice_no, requested_at, request_percent, request_amount,
-                        pdf_path, qr_path, paid_total_at_request
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        invoice_no,
-                        request_time.isoformat(timespec="microseconds"),
-                        request_percent,
-                        float(request_amount),
-                        str(snapshot_pdf_path),
-                        str(snapshot_qr_path or ""),
-                        float(paid_total),
-                    ),
-                )
+                if request_id is None:
+                    con.execute(
+                        """
+                        INSERT INTO invoice_requests (
+                            invoice_no, requested_at, request_percent, request_amount,
+                            pdf_path, qr_path, paid_total_at_request
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            invoice_no,
+                            request_time.isoformat(timespec="microseconds"),
+                            request_percent,
+                            float(request_amount),
+                            str(snapshot_pdf_path),
+                            str(snapshot_qr_path or ""),
+                            float(paid_total),
+                        ),
+                    )
+                else:
+                    con.execute(
+                        """
+                        UPDATE invoice_requests
+                        SET requested_at = ?, request_percent = ?, request_amount = ?,
+                            pdf_path = ?, qr_path = ?, paid_total_at_request = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            request_time.isoformat(timespec="microseconds"),
+                            request_percent,
+                            float(request_amount),
+                            str(snapshot_pdf_path),
+                            str(snapshot_qr_path or ""),
+                            float(paid_total),
+                            request_id,
+                        ),
+                    )
             if not self.sync_invoice_request_pdfs(invoice_no):
                 QMessageBox.warning(
                     self,
