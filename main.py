@@ -5630,9 +5630,9 @@ class InvoiceApp(QMainWindow):
         if windows_pdf_layout:
             sheet.page_setup.fitToWidth = 1
             sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
-            sheet.page_setup.scale = 100
-            sheet.page_margins.left = 0.20
-            sheet.page_margins.right = 0.20
+            sheet.page_setup.scale = 101
+            sheet.page_margins.left = 0.15
+            sheet.page_margins.right = 0.15
             sheet.print_options.horizontalCentered = True
         else:
             sheet.page_setup.fitToWidth = 1
