@@ -5602,13 +5602,13 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 0
+        sheet.page_setup.fitToHeight = 1 if len(items) <= 20 else 0
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
-        sheet.page_margins.left = 0.2
-        sheet.page_margins.right = 0.2
-        sheet.page_margins.top = 0.15 if sys.platform == "win32" else 0.3
-        sheet.page_margins.bottom = 0.2 if sys.platform == "win32" else 0.5
+        sheet.page_margins.left = 0.45
+        sheet.page_margins.right = 0.45
+        sheet.page_margins.top = 0.2
+        sheet.page_margins.bottom = 0.3
         sheet.print_options.horizontalCentered = True
         sheet.print_options.verticalCentered = False
         existing_merges = {str(cell_range) for cell_range in sheet.merged_cells.ranges}
@@ -6096,7 +6096,7 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[51].hidden = False
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
-        minimum_item_row_height = 32 if len(items) <= 10 else 18
+        minimum_item_row_height = 32 if len(items) <= 10 else 20
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
@@ -6104,7 +6104,7 @@ class InvoiceApp(QMainWindow):
                 for line in item["description"].splitlines()
             ) or 1
             base_item_heights.append(
-                max(minimum_item_row_height, wrapped_lines * 22)
+                max(minimum_item_row_height, wrapped_lines * 20)
             )
         for index, item in enumerate(items[:10]):
             row = 18 + index
@@ -6121,7 +6121,7 @@ class InvoiceApp(QMainWindow):
             sheet.row_dimensions[row].height = minimum_item_row_height
             sheet.row_dimensions[row].hidden = False
         item_row_padding = 0
-        if len(items) <= 20:
+        if len(items) <= 10:
             item_section_height = sum(base_item_heights) + (
                 max(0, 10 - len(items))
             ) * minimum_item_row_height
@@ -6432,21 +6432,14 @@ class InvoiceApp(QMainWindow):
                 sheet.cell(row, column).alignment = Alignment(
                     horizontal="center", vertical="center", wrap_text=True
                 )
-        bank_key_column = "C" if document_kind == "INVOICE" else "D"
-        bank_key_addresses = {
-            f"{bank_key_column}{row}" for row in range(44, 47)
-        }
         for row in sheet.iter_rows(min_row=1, max_row=51, min_col=1, max_col=8):
             for cell in row:
                 if cell.value is not None:
                     larger_font = copy(cell.font)
                     if cell.row >= 10:
                         larger_font.name = "Arial"
-                        if (
-                            cell.data_type == "s"
-                            and cell.coordinate not in bank_key_addresses
-                        ):
-                            larger_font.bold = True
+                        larger_font.bold = True
+                        larger_font.color = "FF000000"
                     larger_font.sz = (larger_font.sz or 10) + 2
                     cell.font = larger_font
         heading_addresses = (
@@ -6566,8 +6559,12 @@ class InvoiceApp(QMainWindow):
                     image.anchor._from.row += extra_item_count
             sheet.print_area = f"A1:H{final_row + extra_item_count}"
             sheet.print_title_rows = "16:16"
+            footer_start_row = (
+                (43 if document_kind == "INVOICE" else 47)
+                + extra_item_count
+            )
             if len(items) > 20:
-                sheet.row_breaks.append(Break(id=37))
+                sheet.row_breaks.append(Break(id=footer_start_row - 1))
         right_edge_rows = (
             eoe_row,
             amount_label_row,
@@ -6584,6 +6581,10 @@ class InvoiceApp(QMainWindow):
                 top=current_border.top,
                 bottom=current_border.bottom,
             )
+        if len(items) <= 20:
+            for column in "ABCDEFGH":
+                dimension = sheet.column_dimensions[column]
+                dimension.width = (dimension.width or 8.43) * 0.8
         for address in ("A2",):
             cell = sheet[address]
             current_border = cell.border
