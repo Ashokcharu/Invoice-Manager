@@ -5631,7 +5631,7 @@ class InvoiceApp(QMainWindow):
         )
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
-        horizontal_margin = 0.05 if sys.platform == "win32" else 0.45
+        horizontal_margin = 0 if sys.platform == "win32" else 0.45
         sheet.page_margins.left = horizontal_margin
         sheet.page_margins.right = horizontal_margin
         sheet.page_margins.top = 0.2
@@ -6625,10 +6625,6 @@ class InvoiceApp(QMainWindow):
                 extra_per_empty_row = extra_height / len(empty_item_rows)
                 for row in empty_item_rows:
                     sheet.row_dimensions[row].height += extra_per_empty_row
-            else:
-                extra_per_detail_row = extra_height / 5
-                for row in range(10, 15):
-                    sheet.row_dimensions[row].height += extra_per_detail_row
         item_bottom = Side(style="medium", color="FF000000")
         for row in range(18, item_last_row + 1):
             bottom = (
