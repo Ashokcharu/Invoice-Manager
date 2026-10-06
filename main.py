@@ -118,6 +118,12 @@ def invoice_item_row_shift(sheet):
     item_count = 0
     while sheet.cell(18 + item_count, 2).value:
         item_count += 1
+    if (
+        10 < item_count <= 15
+        and isinstance(sheet["H33"].value, (int, float))
+        and sheet["B33"].value is None
+    ):
+        return 5
     return max(0, item_count - 10)
 
 
@@ -1521,24 +1527,40 @@ class InvoiceApp(QMainWindow):
                 )
                 if value:
                     field.setText(value)
-        for field, row_number in (
-            (self.bundle_count, 44), (self.through, 45)
+        column_a_values = [
+            str(row[0].value or "").strip()
+            for row in sheet.iter_rows(min_col=1, max_col=1)
+        ]
+        for field, label in (
+            (self.bundle_count, "NO OF BUNDLE'S"),
+            (self.through, "THROUGH"),
         ):
-            value = sheet[f"A{row_number + item_row_shift}"].value
+            value = next(
+                (
+                    text
+                    for text in column_a_values
+                    if text.casefold().startswith(label.casefold())
+                ),
+                "",
+            )
             if value:
-                field.setText(str(value).split(":", 1)[-1].strip())
+                field.setText(value.split(":", 1)[-1].strip())
         self.select_bank_profile(self.bank_name.text())
         if row[6]:
             self.bank_upi_id.setText(row[6])
 
-        declaration_parts = [
-            str(sheet[f"A{row_number + item_row_shift}"].value).strip()
-            for row_number in (48, 49)
-            if sheet[f"A{row_number + item_row_shift}"].value
-            and str(sheet[f"A{row_number + item_row_shift}"].value).strip()
-        ]
-        if declaration_parts:
-            self.declaration.setPlainText(" ".join(declaration_parts))
+        declaration_row = next(
+            (
+                index
+                for index, value in enumerate(column_a_values, start=1)
+                if value.casefold() == "declaration"
+            ),
+            None,
+        )
+        if declaration_row:
+            declaration = sheet.cell(declaration_row + 1, 1).value
+            if declaration:
+                self.declaration.setPlainText(str(declaration).strip())
 
         tax_row = next(
             (
@@ -6110,8 +6132,11 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[51].hidden = False
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
-        item_line_height = 24
-        minimum_item_row_height = 24
+        item_slot_count = max(15, len(items))
+        item_line_height = 20
+        minimum_item_row_height = (
+            48 if len(items) <= 15 else 90 if len(items) <= 20 else 24
+        )
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
@@ -6128,16 +6153,14 @@ class InvoiceApp(QMainWindow):
             sheet.cell(row, 2, item["description"])
             sheet.cell(row, 4, item["hsn"])
             sheet.cell(row, 5, Decimal(str(item["quantity"])))
-            sheet.cell(row, 5).number_format = "0.##"
+            sheet.cell(row, 5).number_format = "General"
             sheet.cell(row, 6, float(item["rate"]))
             sheet.cell(row, 7, item["per"])
             sheet.cell(row, 8, float(item["amount"]))
             sheet.row_dimensions[row].height = base_item_heights[index]
         for row in range(18 + len(items), 28):
-            sheet.row_dimensions[row].hidden = len(items) <= 10
-            sheet.row_dimensions[row].height = (
-                0 if len(items) <= 10 else minimum_item_row_height
-            )
+            sheet.row_dimensions[row].hidden = False
+            sheet.row_dimensions[row].height = minimum_item_row_height
         sheet.row_dimensions[16].height = 23
 
         sheet["H28"] = float(subtotal)
@@ -6343,7 +6366,11 @@ class InvoiceApp(QMainWindow):
             )
             signature.width = max(1, int(signature.width * scale))
             signature.height = max(1, int(signature.height * scale))
-            horizontal_offset = max(0, (signatory_width - signature.width) // 2)
+            horizontal_offset = max(
+                0,
+                (signatory_width - signature.width) // 2
+                + signature_column_widths[0] // 2,
+            )
             start_column = 5
             signature_area_height = sum(
                 (sheet.row_dimensions[row].height or 15) * 96 / 72
@@ -6480,7 +6507,7 @@ class InvoiceApp(QMainWindow):
                 if alignment.horizontal in ("left", "right"):
                     alignment.indent = 1
                     cell.alignment = alignment
-        extra_item_count = max(0, len(items) - 10)
+        extra_item_count = item_slot_count - 10
         if extra_item_count:
             shifted_merges = [
                 CellRange(str(cell_range))
@@ -6534,37 +6561,57 @@ class InvoiceApp(QMainWindow):
                 copy(sheet.cell(27, column)._style)
                 for column in range(1, 9)
             ]
-            for item_index, item in enumerate(items[10:], start=10):
+            for item_index in range(10, item_slot_count):
                 row = 18 + item_index
                 for column, style in enumerate(item_row_styles, start=1):
                     sheet.cell(row, column)._style = copy(style)
                 sheet.merge_cells(
                     start_row=row, start_column=2, end_row=row, end_column=3
                 )
-                sheet.cell(row, 1, item_index + 1)
-                sheet.cell(row, 2, item["description"])
-                sheet.cell(row, 4, item["hsn"])
-                sheet.cell(row, 5, Decimal(str(item["quantity"])))
-                sheet.cell(row, 5).number_format = "0.##"
-                sheet.cell(row, 6, float(item["rate"]))
-                sheet.cell(row, 7, item["per"])
-                sheet.cell(row, 8, float(item["amount"]))
-                sheet.row_dimensions[row].height = base_item_heights[item_index]
                 item_alignment = copy(sheet.cell(row, 2).alignment)
                 item_alignment.horizontal = "left"
                 item_alignment.vertical = "center"
                 item_alignment.wrap_text = True
                 item_alignment.indent = 1
                 sheet.cell(row, 2).alignment = item_alignment
+                if item_index < len(items):
+                    item = items[item_index]
+                    sheet.cell(row, 1, item_index + 1)
+                    sheet.cell(row, 2, item["description"])
+                    sheet.cell(row, 4, item["hsn"])
+                    sheet.cell(row, 5, Decimal(str(item["quantity"])))
+                    sheet.cell(row, 5).number_format = "General"
+                    sheet.cell(row, 6, float(item["rate"]))
+                    sheet.cell(row, 7, item["per"])
+                    sheet.cell(row, 8, float(item["amount"]))
+                    sheet.row_dimensions[row].height = base_item_heights[item_index]
+                else:
+                    sheet.row_dimensions[row].height = minimum_item_row_height
 
             for image in sheet._images:
                 if image.anchor._from.row >= 27:
                     image.anchor._from.row += extra_item_count
             sheet.print_area = f"A1:H{final_row + extra_item_count}"
             sheet.print_title_rows = "16:16"
-            if len(items) > 15:
-                footer_start_row = 28 + extra_item_count
-                sheet.row_breaks.append(Break(id=footer_start_row - 1))
+        item_last_row = 17 + item_slot_count
+        item_bottom = Side(style="medium", color="FF000000")
+        for row in range(18, item_last_row + 1):
+            bottom = (
+                item_bottom
+                if row == item_last_row or (len(items) > 15 and row == 32)
+                else None
+            )
+            for column in range(1, 9):
+                cell = sheet.cell(row, column)
+                current = cell.border
+                cell.border = Border(
+                    left=current.left,
+                    right=current.right,
+                    top=current.top,
+                    bottom=bottom or current.bottom,
+                )
+        if len(items) > 15:
+            sheet.row_breaks.append(Break(id=32))
         right_edge_rows = (
             eoe_row,
             amount_label_row,
