@@ -5605,8 +5605,9 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.fitToHeight = 1 if len(items) <= 10 else 0
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
-        sheet.page_margins.left = 0.45
-        sheet.page_margins.right = 0.45
+        horizontal_margin = 0.25 if sys.platform == "win32" else 0.45
+        sheet.page_margins.left = horizontal_margin
+        sheet.page_margins.right = horizontal_margin
         sheet.page_margins.top = 0.2
         sheet.page_margins.bottom = 0.3
         sheet.print_options.horizontalCentered = True
@@ -6334,7 +6335,7 @@ class InvoiceApp(QMainWindow):
                 for column in signature_columns
             ]
             signatory_width = sum(signature_column_widths)
-            signature_width = max(1, int(signatory_width * 0.95))
+            signature_width = max(1, signatory_width)
             signature_height = 90 if len(items) <= 10 else 120
             scale = min(
                 signature_width / signature.width,
