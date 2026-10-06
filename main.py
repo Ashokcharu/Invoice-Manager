@@ -5602,7 +5602,7 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 1 if len(items) <= 20 else 0
+        sheet.page_setup.fitToHeight = 1 if len(items) <= 10 else 0
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
         sheet.page_margins.left = 0.45
@@ -6096,15 +6096,16 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[51].hidden = False
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
-        minimum_item_row_height = 32 if len(items) <= 10 else 20
+        item_line_height = 24
+        minimum_item_row_height = 32 if len(items) <= 10 else 24
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
-            max(1, len(textwrap.wrap(line, width=44, break_long_words=True)))
+                max(1, len(textwrap.wrap(line, width=44, break_long_words=True)))
                 for line in item["description"].splitlines()
             ) or 1
             base_item_heights.append(
-                max(minimum_item_row_height, wrapped_lines * 20)
+                max(minimum_item_row_height, wrapped_lines * item_line_height)
             )
         for index, item in enumerate(items[:10]):
             row = 18 + index
@@ -6324,22 +6325,26 @@ class InvoiceApp(QMainWindow):
         if self.signature_image_path:
             signature = SpreadsheetImage(str(self.signature_image_path))
             signature_columns = ("F", "G", "H")
-            signature_width = 450
-            signature_height = 80 if len(items) <= 10 else 110
+            column_width_scale = 0.95 if len(items) <= 20 else 1
+            signature_column_widths = [
+                int(
+                    (sheet.column_dimensions[column].width or 8.43)
+                    * column_width_scale * 7 + 5
+                )
+                for column in signature_columns
+            ]
+            signatory_width = sum(signature_column_widths)
+            signature_width = max(1, int(signatory_width * 0.95))
+            signature_height = 90 if len(items) <= 10 else 120
             scale = min(
                 signature_width / signature.width,
                 signature_height / signature.height,
             )
             signature.width = max(1, int(signature.width * scale))
             signature.height = max(1, int(signature.height * scale))
-            signature_column_widths = [
-                int((sheet.column_dimensions[column].width or 8.43) * 7 + 5)
-                for column in signature_columns
-            ]
-            signatory_width = sum(signature_column_widths)
             horizontal_offset = max(0, (signatory_width - signature.width) // 2)
             if sys.platform != "win32":
-                horizontal_offset += signature_column_widths[0] * 2 // 3
+                horizontal_offset += signature_column_widths[0] // 2
             start_column = 5
             signature_area_height = sum(
                 (sheet.row_dimensions[row].height or 15) * 96 / 72
@@ -6474,7 +6479,7 @@ class InvoiceApp(QMainWindow):
                 if alignment.horizontal in (None, "general"):
                     alignment.horizontal = "left"
                 if alignment.horizontal in ("left", "right"):
-                    alignment.indent = 2
+                    alignment.indent = 1
                     cell.alignment = alignment
         extra_item_count = max(0, len(items) - 10)
         if extra_item_count:
@@ -6551,7 +6556,7 @@ class InvoiceApp(QMainWindow):
                 item_alignment.horizontal = "left"
                 item_alignment.vertical = "center"
                 item_alignment.wrap_text = True
-                item_alignment.indent = 2
+                item_alignment.indent = 1
                 sheet.cell(row, 2).alignment = item_alignment
 
             for image in sheet._images:
