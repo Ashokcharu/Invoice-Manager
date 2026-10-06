@@ -3217,7 +3217,7 @@ class InvoiceApp(QMainWindow):
         signature_row = QHBoxLayout()
         self.signature_preview = QLabel("No signature")
         self.signature_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.signature_preview.setFixedSize(148, 54)
+        self.signature_preview.setFixedSize(180, 70)
         self.signature_preview.setStyleSheet(
             "QLabel { background: #f5f8f7; color: #71817b; "
             "border: 1px dashed #9db4aa; border-radius: 4px; }"
@@ -6380,7 +6380,7 @@ class InvoiceApp(QMainWindow):
             ]
             signatory_width = sum(signature_column_widths)
             signature_width = max(1, signatory_width)
-            signature_height = 114 if len(items) <= 10 else 152
+            signature_height = 130 if len(items) <= 10 else 170
             scale = min(
                 signature_width / signature.width,
                 signature_height / signature.height,
