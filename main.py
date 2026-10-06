@@ -5579,10 +5579,6 @@ class InvoiceApp(QMainWindow):
 
         workbook = load_workbook(TEMPLATE_DIR / "C GST.xlsx")
         sheet = workbook.active
-        if sys.platform == "win32":
-            for column in "ABCDEFGH":
-                dimension = sheet.column_dimensions[column]
-                dimension.width = (dimension.width or 8.43) * 1.05
         paid_total = (
             self.invoice_paid_total(invoice_no)
             if document_kind == "INVOICE" else Decimal("0.00")
@@ -5606,11 +5602,12 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 1 if len(items) <= 10 else 0
+        sheet.page_setup.fitToHeight = 1 if len(items) <= 20 else 0
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
-        sheet.page_margins.left = 0.45
-        sheet.page_margins.right = 0.45
+        horizontal_margin = 0.25 if sys.platform == "win32" else 0.45
+        sheet.page_margins.left = horizontal_margin
+        sheet.page_margins.right = horizontal_margin
         sheet.page_margins.top = 0.2
         sheet.page_margins.bottom = 0.3
         sheet.print_options.horizontalCentered = True
@@ -6100,8 +6097,11 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[51].hidden = False
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
-        item_line_height = 24
-        minimum_item_row_height = 32 if len(items) <= 10 else 24
+        compact_item_rows = 10 < len(items) <= 20
+        item_line_height = 18 if compact_item_rows else 24
+        minimum_item_row_height = (
+            18 if compact_item_rows else 32 if len(items) <= 10 else 24
+        )
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
