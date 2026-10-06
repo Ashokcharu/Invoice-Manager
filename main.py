@@ -5629,11 +5629,15 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.fitToHeight = (
             1 if len(items) <= 15 else 0
         )
-        sheet.page_setup.scale = None
+        if windows_pdf_layout:
+            sheet.page_setup.scale = 102
+            sheet.page_margins.left = 0.20
+            sheet.page_margins.right = 0.20
+        else:
+            sheet.page_setup.scale = None
+            sheet.page_margins.left = 0.45
+            sheet.page_margins.right = 0.45
         sheet.print_area = "A1:H51"
-        horizontal_margin = 0 if sys.platform == "win32" else 0.45
-        sheet.page_margins.left = horizontal_margin
-        sheet.page_margins.right = horizontal_margin
         sheet.page_margins.top = 0.2
         sheet.page_margins.bottom = 0.3
         sheet.print_options.horizontalCentered = True
@@ -5999,6 +6003,7 @@ class InvoiceApp(QMainWindow):
             sheet.column_dimensions["G"].width = 16
             sheet.column_dimensions["H"].width = 30
             if windows_pdf_layout:
+                sheet.column_dimensions["G"].width = 16.5
                 sheet.column_dimensions["H"].width = 31.5
             sheet.column_dimensions["B"].width = 46
             sheet.column_dimensions["C"].width = 20.99
