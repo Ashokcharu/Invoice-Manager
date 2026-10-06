@@ -5602,7 +5602,7 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 1 if len(items) <= 20 else 0
+        sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
         horizontal_margin = 0.25 if sys.platform == "win32" else 0.45
@@ -5916,6 +5916,19 @@ class InvoiceApp(QMainWindow):
             for line in phone_values.splitlines()
         ) or 1
         sheet.row_dimensions[9].height = max(24, contact_lines * 16 + 10)
+        seller_contact_lines = sum(
+            max(
+                1,
+                len(textwrap.wrap(
+                    line,
+                    width=contact_width,
+                    break_long_words=True,
+                    break_on_hyphens=True,
+                )),
+            )
+            for line in str(sheet["A8"].value or "").splitlines()
+        ) or 1
+        sheet.row_dimensions[8].height = max(24, seller_contact_lines * 18 + 8)
         if document_kind == "INVOICE":
             for cell_range in (
                 "A43:B43", "C43:E43", "F43:H43",
@@ -6097,11 +6110,8 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[51].hidden = False
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
-        compact_item_rows = 10 < len(items) <= 20
-        item_line_height = 18 if compact_item_rows else 24
-        minimum_item_row_height = (
-            18 if compact_item_rows else 32 if len(items) <= 10 else 24
-        )
+        item_line_height = 24
+        minimum_item_row_height = 24
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
@@ -6124,28 +6134,10 @@ class InvoiceApp(QMainWindow):
             sheet.cell(row, 8, float(item["amount"]))
             sheet.row_dimensions[row].height = base_item_heights[index]
         for row in range(18 + len(items), 28):
-            sheet.row_dimensions[row].height = minimum_item_row_height
-            sheet.row_dimensions[row].hidden = False
-        item_row_padding = 0
-        if len(items) <= 10:
-            item_section_height = sum(base_item_heights) + (
-                max(0, 10 - len(items))
-            ) * minimum_item_row_height
-            extra_item_height = max(0, 450 - item_section_height)
-            empty_item_rows = max(0, 10 - len(items))
-            if empty_item_rows:
-                empty_height = (
-                    minimum_item_row_height
-                    + extra_item_height / empty_item_rows
-                )
-                for row in range(18 + len(items), 28):
-                    sheet.row_dimensions[row].height = empty_height
-            elif items:
-                item_row_padding = extra_item_height / len(items)
-                for index, row_height in enumerate(base_item_heights):
-                    sheet.row_dimensions[18 + index].height = (
-                        row_height + item_row_padding
-                    )
+            sheet.row_dimensions[row].hidden = len(items) <= 10
+            sheet.row_dimensions[row].height = (
+                0 if len(items) <= 10 else minimum_item_row_height
+            )
         sheet.row_dimensions[16].height = 23
 
         sheet["H28"] = float(subtotal)
@@ -6250,6 +6242,10 @@ class InvoiceApp(QMainWindow):
             for row in (*range(1, 17), *range(28, 52)):
                 if not sheet.row_dimensions[row].hidden:
                     sheet.row_dimensions[row].height += 6
+        sheet.row_dimensions[8].height = max(
+            sheet.row_dimensions[8].height or 15,
+            seller_contact_lines * 18 + 8,
+        )
 
         for row in range(18, 28):
             for column in (1, 5, 6, 7, 8):
@@ -6553,9 +6549,7 @@ class InvoiceApp(QMainWindow):
                 sheet.cell(row, 6, float(item["rate"]))
                 sheet.cell(row, 7, item["per"])
                 sheet.cell(row, 8, float(item["amount"]))
-                sheet.row_dimensions[row].height = (
-                    base_item_heights[item_index] + item_row_padding
-                )
+                sheet.row_dimensions[row].height = base_item_heights[item_index]
                 item_alignment = copy(sheet.cell(row, 2).alignment)
                 item_alignment.horizontal = "left"
                 item_alignment.vertical = "center"
@@ -6568,11 +6562,8 @@ class InvoiceApp(QMainWindow):
                     image.anchor._from.row += extra_item_count
             sheet.print_area = f"A1:H{final_row + extra_item_count}"
             sheet.print_title_rows = "16:16"
-            footer_start_row = (
-                (43 if document_kind == "INVOICE" else 47)
-                + extra_item_count
-            )
-            if len(items) > 20:
+            if len(items) > 15:
+                footer_start_row = 28 + extra_item_count
                 sheet.row_breaks.append(Break(id=footer_start_row - 1))
         right_edge_rows = (
             eoe_row,
