@@ -6325,7 +6325,7 @@ class InvoiceApp(QMainWindow):
         if self.signature_image_path:
             signature = SpreadsheetImage(str(self.signature_image_path))
             signature_columns = ("F", "G", "H")
-            column_width_scale = 0.95 if len(items) <= 20 else 1
+            column_width_scale = 1
             signature_column_widths = [
                 int(
                     (sheet.column_dimensions[column].width or 8.43)
@@ -6586,10 +6586,6 @@ class InvoiceApp(QMainWindow):
                 top=current_border.top,
                 bottom=current_border.bottom,
             )
-        if len(items) <= 20:
-            for column in "ABCDEFGH":
-                dimension = sheet.column_dimensions[column]
-                dimension.width = (dimension.width or 8.43) * 0.95
         for address in ("A2",):
             cell = sheet[address]
             current_border = cell.border
