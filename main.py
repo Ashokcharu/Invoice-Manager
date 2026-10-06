@@ -6584,7 +6584,7 @@ class InvoiceApp(QMainWindow):
         if len(items) <= 20:
             for column in "ABCDEFGH":
                 dimension = sheet.column_dimensions[column]
-                dimension.width = (dimension.width or 8.43) * 0.8
+                dimension.width = (dimension.width or 8.43) * 0.95
         for address in ("A2",):
             cell = sheet[address]
             current_border = cell.border
