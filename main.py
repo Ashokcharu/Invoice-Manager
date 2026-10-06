@@ -97,7 +97,7 @@ DB_PATH = DATA_DIR / "invoices.db"
 SIGNATURE_PATH = DATA_DIR / "invoice_signature.png"
 START_INVOICE_NUMBER = 101
 START_PRIVATE_INVOICE_NUMBER = 100001
-MAX_INVOICE_ITEMS = 15
+MAX_INVOICE_ITEMS = 10
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 INVOICE_DIR.mkdir(parents=True, exist_ok=True)
@@ -119,7 +119,7 @@ def invoice_item_row_shift(sheet):
     while sheet.cell(18 + item_count, 2).value:
         item_count += 1
     if (
-        10 < item_count <= 15
+        item_count <= 15
         and isinstance(sheet["H33"].value, (int, float))
         and sheet["B33"].value is None
     ):
@@ -5631,7 +5631,7 @@ class InvoiceApp(QMainWindow):
         )
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
-        horizontal_margin = 0.25 if sys.platform == "win32" else 0.45
+        horizontal_margin = 0.05 if sys.platform == "win32" else 0.45
         sheet.page_margins.left = horizontal_margin
         sheet.page_margins.right = horizontal_margin
         sheet.page_margins.top = 0.2
@@ -6142,7 +6142,7 @@ class InvoiceApp(QMainWindow):
         sheet.row_dimensions[51].hidden = False
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
-        item_slot_count = max(15, len(items))
+        item_slot_count = max(10, len(items))
         item_line_height = 19 if windows_pdf_layout else 20
         if windows_pdf_layout and len(items) <= 15:
             minimum_item_row_height = 24
@@ -6614,15 +6614,21 @@ class InvoiceApp(QMainWindow):
             sheet.print_title_rows = "16:16"
         item_last_row = 17 + item_slot_count
         if windows_pdf_layout and len(items) <= 15:
-            item_rows = range(18, 33)
+            item_rows = range(18, 18 + item_slot_count)
             current_item_height = sum(
                 sheet.row_dimensions[row].height or 15
                 for row in item_rows
             )
             extra_height = max(0, 450 - current_item_height)
-            extra_per_detail_row = extra_height / 5
-            for row in range(10, 15):
-                sheet.row_dimensions[row].height += extra_per_detail_row
+            empty_item_rows = range(18 + len(items), 18 + item_slot_count)
+            if len(empty_item_rows):
+                extra_per_empty_row = extra_height / len(empty_item_rows)
+                for row in empty_item_rows:
+                    sheet.row_dimensions[row].height += extra_per_empty_row
+            else:
+                extra_per_detail_row = extra_height / 5
+                for row in range(10, 15):
+                    sheet.row_dimensions[row].height += extra_per_detail_row
         item_bottom = Side(style="medium", color="FF000000")
         for row in range(18, item_last_row + 1):
             bottom = (
