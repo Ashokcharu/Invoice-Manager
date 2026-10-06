@@ -5621,26 +5621,27 @@ class InvoiceApp(QMainWindow):
                     cell.value = None
         sheet.title = "MAIN"
         sheet.sheet_view.showGridLines = False
-        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        windows_pdf_layout = sys.platform == "win32"
+        sheet.sheet_properties.pageSetUpPr.fitToPage = not windows_pdf_layout
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
-        sheet.page_setup.fitToWidth = 1
-        windows_pdf_layout = sys.platform == "win32"
-        sheet.page_setup.fitToHeight = (
-            1 if len(items) <= 15 else 0
-        )
         if windows_pdf_layout:
-            sheet.page_setup.scale = 102
-            sheet.page_margins.left = 0.20
-            sheet.page_margins.right = 0.20
+            sheet.page_setup.fitToWidth = 0
+            sheet.page_setup.fitToHeight = 0
+            sheet.page_setup.scale = 106
+            sheet.page_margins.left = 0.10
+            sheet.page_margins.right = 0.10
+            sheet.print_options.horizontalCentered = False
         else:
+            sheet.page_setup.fitToWidth = 1
+            sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
             sheet.page_setup.scale = None
             sheet.page_margins.left = 0.45
             sheet.page_margins.right = 0.45
+            sheet.print_options.horizontalCentered = True
         sheet.print_area = "A1:H51"
         sheet.page_margins.top = 0.2
         sheet.page_margins.bottom = 0.3
-        sheet.print_options.horizontalCentered = True
         sheet.print_options.verticalCentered = False
         existing_merges = {str(cell_range) for cell_range in sheet.merged_cells.ranges}
         for merge_range in (
