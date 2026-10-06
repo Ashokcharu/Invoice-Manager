@@ -5624,7 +5624,10 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
+        windows_pdf_layout = sys.platform == "win32"
+        sheet.page_setup.fitToHeight = (
+            0 if windows_pdf_layout else 1 if len(items) <= 15 else 0
+        )
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
         horizontal_margin = 0.25 if sys.platform == "win32" else 0.45
@@ -6133,10 +6136,13 @@ class InvoiceApp(QMainWindow):
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
         item_slot_count = max(15, len(items))
-        item_line_height = 20
-        minimum_item_row_height = (
-            48 if len(items) <= 15 else 90 if len(items) <= 20 else 24
-        )
+        item_line_height = 19 if windows_pdf_layout else 20
+        if windows_pdf_layout:
+            minimum_item_row_height = 80 if len(items) <= 20 else 24
+        else:
+            minimum_item_row_height = (
+                48 if len(items) <= 15 else 90 if len(items) <= 20 else 24
+            )
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
@@ -6610,7 +6616,7 @@ class InvoiceApp(QMainWindow):
                     top=current.top,
                     bottom=bottom or current.bottom,
                 )
-        if len(items) > 15:
+        if len(items) > 15 or windows_pdf_layout:
             sheet.row_breaks.append(Break(id=32))
         right_edge_rows = (
             eoe_row,
