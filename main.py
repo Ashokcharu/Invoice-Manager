@@ -5624,7 +5624,7 @@ class InvoiceApp(QMainWindow):
         sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = (
-            sheet.PAPERSIZE_LETTER if sys.platform == "win32"
+            sheet.PAPERSIZE_A3 if sys.platform == "win32"
             else sheet.PAPERSIZE_A4
         )
         sheet.page_setup.fitToWidth = 1
