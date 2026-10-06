@@ -5624,14 +5624,16 @@ class InvoiceApp(QMainWindow):
         windows_pdf_layout = sys.platform == "win32"
         sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.orientation = "portrait"
-        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.paperSize = (
+            sheet.PAPERSIZE_A3 if windows_pdf_layout else sheet.PAPERSIZE_A4
+        )
         if windows_pdf_layout:
-            sheet.page_setup.fitToWidth = 0
-            sheet.page_setup.fitToHeight = 0
-            sheet.page_setup.scale = 103
-            sheet.page_margins.left = 0.18
-            sheet.page_margins.right = 0.18
-            sheet.print_options.horizontalCentered = False
+            sheet.page_setup.fitToWidth = 1
+            sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
+            sheet.page_setup.scale = 100
+            sheet.page_margins.left = 0.20
+            sheet.page_margins.right = 0.20
+            sheet.print_options.horizontalCentered = True
         else:
             sheet.page_setup.fitToWidth = 1
             sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
@@ -6004,9 +6006,9 @@ class InvoiceApp(QMainWindow):
             sheet.column_dimensions["G"].width = 16.2
             sheet.column_dimensions["H"].width = 30.3
             if windows_pdf_layout:
-                sheet.column_dimensions["F"].width = 17.0
-                sheet.column_dimensions["G"].width = 17.5
-                sheet.column_dimensions["H"].width = 32.0
+                sheet.column_dimensions["F"].width = 16.5
+                sheet.column_dimensions["G"].width = 16.8
+                sheet.column_dimensions["H"].width = 31.2
             sheet.column_dimensions["B"].width = 46
             sheet.column_dimensions["C"].width = 20.99
             sheet.row_dimensions[47].height = 20
