@@ -6001,6 +6001,8 @@ class InvoiceApp(QMainWindow):
             sheet.column_dimensions["F"].width = 16
             sheet.column_dimensions["G"].width = 16
             sheet.column_dimensions["H"].width = 30
+            if windows_pdf_layout:
+                sheet.column_dimensions["H"].width = 31.5
             sheet.column_dimensions["B"].width = 46
             sheet.column_dimensions["C"].width = 20.99
             sheet.row_dimensions[47].height = 20
@@ -6381,7 +6383,7 @@ class InvoiceApp(QMainWindow):
             ]
             signatory_width = sum(signature_column_widths)
             signature_width = max(1, signatory_width)
-            signature_height = 104 if len(items) <= 10 else 138
+            signature_height = 114 if len(items) <= 10 else 152
             scale = min(
                 signature_width / signature.width,
                 signature_height / signature.height,
