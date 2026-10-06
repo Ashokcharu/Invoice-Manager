@@ -5622,16 +5622,16 @@ class InvoiceApp(QMainWindow):
         sheet.title = "MAIN"
         sheet.sheet_view.showGridLines = False
         windows_pdf_layout = sys.platform == "win32"
-        sheet.sheet_properties.pageSetUpPr.fitToPage = not windows_pdf_layout
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
         if windows_pdf_layout:
-            sheet.page_setup.fitToWidth = 0
-            sheet.page_setup.fitToHeight = 0
-            sheet.page_setup.scale = 106
-            sheet.page_margins.left = 0.10
-            sheet.page_margins.right = 0.10
-            sheet.print_options.horizontalCentered = False
+            sheet.page_setup.fitToWidth = 1
+            sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
+            sheet.page_setup.scale = 101
+            sheet.page_margins.left = 0.25
+            sheet.page_margins.right = 0.25
+            sheet.print_options.horizontalCentered = True
         else:
             sheet.page_setup.fitToWidth = 1
             sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
@@ -6001,11 +6001,12 @@ class InvoiceApp(QMainWindow):
             for row in range(44, 47):
                 sheet.row_dimensions[row].height = 32
             sheet.column_dimensions["F"].width = 16
-            sheet.column_dimensions["G"].width = 16
-            sheet.column_dimensions["H"].width = 30
+            sheet.column_dimensions["G"].width = 16.2
+            sheet.column_dimensions["H"].width = 30.3
             if windows_pdf_layout:
-                sheet.column_dimensions["G"].width = 16.5
-                sheet.column_dimensions["H"].width = 31.5
+                sheet.column_dimensions["F"].width = 16.5
+                sheet.column_dimensions["G"].width = 16.8
+                sheet.column_dimensions["H"].width = 31.2
             sheet.column_dimensions["B"].width = 46
             sheet.column_dimensions["C"].width = 20.99
             sheet.row_dimensions[47].height = 20
