@@ -5579,6 +5579,10 @@ class InvoiceApp(QMainWindow):
 
         workbook = load_workbook(TEMPLATE_DIR / "C GST.xlsx")
         sheet = workbook.active
+        if sys.platform == "win32":
+            for column in "ABCDEFGH":
+                dimension = sheet.column_dimensions[column]
+                dimension.width = (dimension.width or 8.43) * 1.05
         paid_total = (
             self.invoice_paid_total(invoice_no)
             if document_kind == "INVOICE" else Decimal("0.00")
@@ -5598,23 +5602,15 @@ class InvoiceApp(QMainWindow):
                     cell.value = None
         sheet.title = "MAIN"
         sheet.sheet_view.showGridLines = False
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
-        if sys.platform == "win32":
-            base_scale = sheet.page_setup.scale or 61
-            sheet.sheet_properties.pageSetUpPr.fitToPage = False
-            sheet.page_setup.fitToWidth = 0
-            sheet.page_setup.fitToHeight = 0
-            sheet.page_setup.scale = round(base_scale * 1.05)
-        else:
-            sheet.sheet_properties.pageSetUpPr.fitToPage = True
-            sheet.page_setup.fitToWidth = 1
-            sheet.page_setup.fitToHeight = 1 if len(items) <= 10 else 0
-            sheet.page_setup.scale = None
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 1 if len(items) <= 10 else 0
+        sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
-        horizontal_margin = 0.25 if sys.platform == "win32" else 0.45
-        sheet.page_margins.left = horizontal_margin
-        sheet.page_margins.right = horizontal_margin
+        sheet.page_margins.left = 0.45
+        sheet.page_margins.right = 0.45
         sheet.page_margins.top = 0.2
         sheet.page_margins.bottom = 0.3
         sheet.print_options.horizontalCentered = True
