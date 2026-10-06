@@ -5624,23 +5624,16 @@ class InvoiceApp(QMainWindow):
         sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.fitToWidth = 1
         windows_pdf_layout = sys.platform == "win32"
-        if windows_pdf_layout:
-            sheet.page_setup.fitToWidth = 0
-            sheet.page_setup.fitToHeight = 0
-            sheet.page_setup.scale = 110
-            sheet.page_margins.left = 0.15
-            sheet.page_margins.right = 0.15
-            for column in ("B", "C", "H"):
-                current_width = sheet.column_dimensions[column].width or 8.43
-                sheet.column_dimensions[column].width = current_width + 2
-        else:
-            sheet.page_setup.fitToWidth = 1
-            sheet.page_setup.fitToHeight = 1 if len(items) <= 15 else 0
-            sheet.page_setup.scale = None
-            sheet.page_margins.left = 0.45
-            sheet.page_margins.right = 0.45
+        sheet.page_setup.fitToHeight = (
+            1 if len(items) <= 15 else 0
+        )
+        sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
+        horizontal_margin = 0 if sys.platform == "win32" else 0.45
+        sheet.page_margins.left = horizontal_margin
+        sheet.page_margins.right = horizontal_margin
         sheet.page_margins.top = 0.2
         sheet.page_margins.bottom = 0.3
         sheet.print_options.horizontalCentered = True
@@ -6295,7 +6288,8 @@ class InvoiceApp(QMainWindow):
                     sheet.row_dimensions[row].height += 6
         sheet.row_dimensions[8].height = max(
             sheet.row_dimensions[8].height or 15,
-            seller_contact_lines * 18 + 8,
+            seller_contact_lines * 18 + 12,
+            38,
         )
 
         for row in range(18, 28):
@@ -6320,7 +6314,7 @@ class InvoiceApp(QMainWindow):
             )
         for address in ("A8",):
             sheet[address].alignment = Alignment(
-                horizontal="center", vertical="center", wrap_text=True
+                horizontal="center", vertical="top", wrap_text=True
             )
         sheet["A9"].alignment = Alignment(
             horizontal="right", vertical="top", wrap_text=True
