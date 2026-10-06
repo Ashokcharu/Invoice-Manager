@@ -6121,6 +6121,12 @@ class InvoiceApp(QMainWindow):
         for row in range(10, 16):
             current_height = sheet.row_dimensions[row].height or 15
             sheet.row_dimensions[row].height = round(current_height, 1)
+        if windows_pdf_layout:
+            for row in (12, 13, 14):
+                sheet.row_dimensions[row].height = max(
+                    sheet.row_dimensions[row].height or 15,
+                    30,
+                )
         sheet[f"A{amount_label_row}"] = (
             f"Amount Chargeable (in words): {amount_to_words(total)}"
         )
@@ -6139,7 +6145,7 @@ class InvoiceApp(QMainWindow):
         item_slot_count = max(15, len(items))
         item_line_height = 19 if windows_pdf_layout else 20
         if windows_pdf_layout and len(items) <= 15:
-            minimum_item_row_height = 48
+            minimum_item_row_height = 24
         elif windows_pdf_layout:
             minimum_item_row_height = 24
         else:
@@ -6607,6 +6613,16 @@ class InvoiceApp(QMainWindow):
             sheet.print_area = f"A1:H{final_row + extra_item_count}"
             sheet.print_title_rows = "16:16"
         item_last_row = 17 + item_slot_count
+        if windows_pdf_layout and len(items) <= 15:
+            item_rows = range(18, 33)
+            current_item_height = sum(
+                sheet.row_dimensions[row].height or 15
+                for row in item_rows
+            )
+            extra_height = max(0, 450 - current_item_height)
+            extra_per_detail_row = extra_height / 5
+            for row in range(10, 15):
+                sheet.row_dimensions[row].height += extra_per_detail_row
         item_bottom = Side(style="medium", color="FF000000")
         for row in range(18, item_last_row + 1):
             bottom = (
@@ -6640,6 +6656,17 @@ class InvoiceApp(QMainWindow):
                 right=right_edge,
                 top=current_border.top,
                 bottom=current_border.bottom,
+            )
+        amount_words_row = amount_label_row + extra_item_count
+        amount_words_edge = Side(style="medium", color="FF000000")
+        for column in range(1, 9):
+            cell = sheet.cell(amount_words_row, column)
+            current_border = cell.border
+            cell.border = Border(
+                left=(amount_words_edge if column == 1 else current_border.left),
+                right=(amount_words_edge if column == 8 else current_border.right),
+                top=amount_words_edge,
+                bottom=amount_words_edge,
             )
         for address in ("A2",):
             cell = sheet[address]
