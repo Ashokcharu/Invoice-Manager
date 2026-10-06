@@ -5623,7 +5623,10 @@ class InvoiceApp(QMainWindow):
         sheet.sheet_view.showGridLines = False
         sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.orientation = "portrait"
-        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.paperSize = (
+            sheet.PAPERSIZE_LETTER if sys.platform == "win32"
+            else sheet.PAPERSIZE_A4
+        )
         sheet.page_setup.fitToWidth = 1
         windows_pdf_layout = sys.platform == "win32"
         sheet.page_setup.fitToHeight = (
