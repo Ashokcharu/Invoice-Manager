@@ -97,7 +97,7 @@ DB_PATH = DATA_DIR / "invoices.db"
 SIGNATURE_PATH = DATA_DIR / "invoice_signature.png"
 START_INVOICE_NUMBER = 101
 START_PRIVATE_INVOICE_NUMBER = 100001
-MAX_INVOICE_ITEMS = 100
+MAX_INVOICE_ITEMS = 15
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 INVOICE_DIR.mkdir(parents=True, exist_ok=True)
@@ -5191,7 +5191,8 @@ class InvoiceApp(QMainWindow):
             QMessageBox.information(
                 self,
                 "Item Limit",
-                f"An invoice can contain up to {MAX_INVOICE_ITEMS} item rows."
+                f"An invoice or quotation can contain up to "
+                f"{MAX_INVOICE_ITEMS} item rows."
             )
             return
 
@@ -6136,13 +6137,15 @@ class InvoiceApp(QMainWindow):
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
         item_slot_count = max(15, len(items))
-        if windows_pdf_layout and len(items) <= 15:
-            item_slot_count = max(1, len(items))
         item_line_height = 19 if windows_pdf_layout else 20
-        minimum_item_row_height = (
-            24 if windows_pdf_layout else
-            48 if len(items) <= 15 else 90 if len(items) <= 20 else 24
-        )
+        if windows_pdf_layout and len(items) <= 15:
+            minimum_item_row_height = 48
+        elif windows_pdf_layout:
+            minimum_item_row_height = 24
+        else:
+            minimum_item_row_height = (
+                48 if len(items) <= 15 else 90 if len(items) <= 20 else 24
+            )
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
