@@ -5598,12 +5598,19 @@ class InvoiceApp(QMainWindow):
                     cell.value = None
         sheet.title = "MAIN"
         sheet.sheet_view.showGridLines = False
-        sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.orientation = "portrait"
         sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
-        sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 1 if len(items) <= 10 else 0
-        sheet.page_setup.scale = None
+        if sys.platform == "win32":
+            base_scale = sheet.page_setup.scale or 61
+            sheet.sheet_properties.pageSetUpPr.fitToPage = False
+            sheet.page_setup.fitToWidth = 0
+            sheet.page_setup.fitToHeight = 0
+            sheet.page_setup.scale = round(base_scale * 1.05)
+        else:
+            sheet.sheet_properties.pageSetUpPr.fitToPage = True
+            sheet.page_setup.fitToWidth = 1
+            sheet.page_setup.fitToHeight = 1 if len(items) <= 10 else 0
+            sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
         horizontal_margin = 0.25 if sys.platform == "win32" else 0.45
         sheet.page_margins.left = horizontal_margin
@@ -6114,7 +6121,8 @@ class InvoiceApp(QMainWindow):
             sheet.cell(row, 1, index + 1)
             sheet.cell(row, 2, item["description"])
             sheet.cell(row, 4, item["hsn"])
-            sheet.cell(row, 5, float(item["quantity"]))
+            sheet.cell(row, 5, Decimal(str(item["quantity"])))
+            sheet.cell(row, 5).number_format = "0.##"
             sheet.cell(row, 6, float(item["rate"]))
             sheet.cell(row, 7, item["per"])
             sheet.cell(row, 8, float(item["amount"]))
@@ -6336,7 +6344,7 @@ class InvoiceApp(QMainWindow):
             ]
             signatory_width = sum(signature_column_widths)
             signature_width = max(1, signatory_width)
-            signature_height = 90 if len(items) <= 10 else 120
+            signature_height = 104 if len(items) <= 10 else 138
             scale = min(
                 signature_width / signature.width,
                 signature_height / signature.height,
@@ -6344,8 +6352,6 @@ class InvoiceApp(QMainWindow):
             signature.width = max(1, int(signature.width * scale))
             signature.height = max(1, int(signature.height * scale))
             horizontal_offset = max(0, (signatory_width - signature.width) // 2)
-            if sys.platform != "win32":
-                horizontal_offset += signature_column_widths[0] // 2
             start_column = 5
             signature_area_height = sum(
                 (sheet.row_dimensions[row].height or 15) * 96 / 72
@@ -6546,7 +6552,8 @@ class InvoiceApp(QMainWindow):
                 sheet.cell(row, 1, item_index + 1)
                 sheet.cell(row, 2, item["description"])
                 sheet.cell(row, 4, item["hsn"])
-                sheet.cell(row, 5, float(item["quantity"]))
+                sheet.cell(row, 5, Decimal(str(item["quantity"])))
+                sheet.cell(row, 5).number_format = "0.##"
                 sheet.cell(row, 6, float(item["rate"]))
                 sheet.cell(row, 7, item["per"])
                 sheet.cell(row, 8, float(item["amount"]))
