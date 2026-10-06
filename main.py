@@ -5626,7 +5626,7 @@ class InvoiceApp(QMainWindow):
         sheet.page_setup.fitToWidth = 1
         windows_pdf_layout = sys.platform == "win32"
         sheet.page_setup.fitToHeight = (
-            0 if windows_pdf_layout else 1 if len(items) <= 15 else 0
+            1 if len(items) <= 15 else 0
         )
         sheet.page_setup.scale = None
         sheet.print_area = "A1:H51"
@@ -6136,13 +6136,13 @@ class InvoiceApp(QMainWindow):
         sheet[jurisdiction_cell] = self.jurisdiction.text().strip()
 
         item_slot_count = max(15, len(items))
+        if windows_pdf_layout and len(items) <= 15:
+            item_slot_count = max(1, len(items))
         item_line_height = 19 if windows_pdf_layout else 20
-        if windows_pdf_layout:
-            minimum_item_row_height = 80 if len(items) <= 20 else 24
-        else:
-            minimum_item_row_height = (
-                48 if len(items) <= 15 else 90 if len(items) <= 20 else 24
-            )
+        minimum_item_row_height = (
+            24 if windows_pdf_layout else
+            48 if len(items) <= 15 else 90 if len(items) <= 20 else 24
+        )
         base_item_heights = []
         for item in items:
             wrapped_lines = sum(
@@ -6165,8 +6165,12 @@ class InvoiceApp(QMainWindow):
             sheet.cell(row, 8, float(item["amount"]))
             sheet.row_dimensions[row].height = base_item_heights[index]
         for row in range(18 + len(items), 28):
-            sheet.row_dimensions[row].hidden = False
-            sheet.row_dimensions[row].height = minimum_item_row_height
+            empty_slot = row >= 18 + item_slot_count
+            sheet.row_dimensions[row].hidden = windows_pdf_layout and empty_slot
+            sheet.row_dimensions[row].height = (
+                0 if windows_pdf_layout and empty_slot
+                else minimum_item_row_height
+            )
         sheet.row_dimensions[16].height = 23
 
         sheet["H28"] = float(subtotal)
@@ -6513,7 +6517,7 @@ class InvoiceApp(QMainWindow):
                 if alignment.horizontal in ("left", "right"):
                     alignment.indent = 1
                     cell.alignment = alignment
-        extra_item_count = item_slot_count - 10
+        extra_item_count = max(0, item_slot_count - 10)
         if extra_item_count:
             shifted_merges = [
                 CellRange(str(cell_range))
@@ -6616,7 +6620,7 @@ class InvoiceApp(QMainWindow):
                     top=current.top,
                     bottom=bottom or current.bottom,
                 )
-        if len(items) > 15 or windows_pdf_layout:
+        if len(items) > 15:
             sheet.row_breaks.append(Break(id=32))
         right_edge_rows = (
             eoe_row,
