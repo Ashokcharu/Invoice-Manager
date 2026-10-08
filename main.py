@@ -137,6 +137,40 @@ def normalize_indian_mobile(value):
         return ""
     return f"91{digits}"
 
+def backfill_invoice_mobiles(con):
+    rows = con.execute(
+        """
+        SELECT id, xlsx_path FROM invoices
+        WHERE TRIM(COALESCE(customer_mobile, '')) = ''
+                    AND document_kind IN ('INVOICE', 'QUOTATION')
+        """
+    ).fetchall()
+    for invoice_id, raw_path in rows:
+        if not raw_path:
+            continue
+        workbook_path = Path(raw_path)
+        if not workbook_path.is_absolute():
+            workbook_path = APP_DIR / workbook_path
+        if not workbook_path.is_file():
+            continue
+        try:
+            workbook = load_workbook(
+                workbook_path, read_only=True, data_only=True
+            )
+            try:
+                contact = str(workbook.active["A13"].value or "")
+            finally:
+                workbook.close()
+        except Exception:
+            continue
+        match = re.search(r"(?i)\bmobile\s*:\s*(.+)", contact)
+        mobile = normalize_indian_mobile(match.group(1)) if match else ""
+        if mobile:
+            con.execute(
+                "UPDATE invoices SET customer_mobile = ? WHERE id = ?",
+                (mobile, invoice_id),
+            )
+
 
 def number_to_words(value):
     value = int(value)
@@ -680,6 +714,11 @@ class InvoiceApp(QMainWindow):
                             "WHERE invoice_no = ? AND document_kind = ?",
                             (invoice_no, document_kind),
                         )
+            if "customer_mobile" not in columns:
+                con.execute(
+                    "ALTER TABLE invoices ADD COLUMN "
+                    "customer_mobile TEXT NOT NULL DEFAULT ''"
+                )
             single_number_unique_index = False
             for index in con.execute("PRAGMA index_list(invoices)"):
                 if index[2]:
@@ -701,6 +740,7 @@ class InvoiceApp(QMainWindow):
                         invoice_date TEXT NOT NULL,
                         invoice_type TEXT NOT NULL,
                         customer_name TEXT,
+                        customer_mobile TEXT NOT NULL DEFAULT '',
                         grand_total REAL,
                         xlsx_path TEXT,
                         pdf_path TEXT,
@@ -717,17 +757,31 @@ class InvoiceApp(QMainWindow):
                     """
                     INSERT INTO invoices_migrated (
                         id, invoice_no, invoice_date, invoice_type, customer_name,
-                        grand_total, xlsx_path, pdf_path, created_at, document_kind,
+                                customer_mobile, grand_total, xlsx_path, pdf_path, created_at, document_kind,
                                 qr_scanner_path, payment_address, is_private
                     )
                     SELECT id, invoice_no, invoice_date, invoice_type, customer_name,
-                           grand_total, xlsx_path, pdf_path, created_at, document_kind,
+                                    customer_mobile, grand_total, xlsx_path, pdf_path, created_at, document_kind,
                                     qr_scanner_path, payment_address, is_private
                     FROM invoices
                     """
                 )
                 con.execute("DROP TABLE invoices")
                 con.execute("ALTER TABLE invoices_migrated RENAME TO invoices")
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS app_migrations "
+                "(name TEXT PRIMARY KEY)"
+            )
+            mobile_backfill_migration = "document_mobile_backfill_v2"
+            if not con.execute(
+                "SELECT 1 FROM app_migrations WHERE name = ?",
+                (mobile_backfill_migration,),
+            ).fetchone():
+                backfill_invoice_mobiles(con)
+                con.execute(
+                    "INSERT INTO app_migrations (name) VALUES (?)",
+                    (mobile_backfill_migration,),
+                )
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bank_profiles (
@@ -3306,7 +3360,7 @@ class InvoiceApp(QMainWindow):
         toolbar.addWidget(series_controls)
         self.pending_invoice_search = QLineEdit()
         self.pending_invoice_search.setPlaceholderText(
-            "Search customer or invoice number"
+            "Search customer, invoice number, or buyer mobile"
         )
         self.pending_invoice_search.textChanged.connect(
             lambda value: self.reset_pending_invoice_page()
@@ -3392,6 +3446,12 @@ class InvoiceApp(QMainWindow):
 
         search = self.pending_invoice_search.text().strip()
         search_pattern = f"%{search}%"
+        search_digits = re.sub(r"\D", "", search)
+        if len(search_digits) == 12 and search_digits.startswith("91"):
+            search_digits = search_digits[2:]
+        elif len(search_digits) == 11 and search_digits.startswith("0"):
+            search_digits = search_digits[1:]
+        mobile_pattern = f"%{search_digits}%" if search_digits else "%NO_DIGITS%"
         paid_filter = "" if self.include_paid_invoices.isChecked() else (
             "COALESCE(i.grand_total, 0) - COALESCE(SUM(p.amount), 0) > 0.005 AND "
         )
@@ -3401,6 +3461,8 @@ class InvoiceApp(QMainWindow):
                 SELECT i.invoice_no, i.invoice_date, i.customer_name,
                        i.grand_total, COALESCE(SUM(p.amount), 0) AS received
                 FROM invoices AS i
+                                LEFT JOIN buyer_profiles AS bp
+                                    ON bp.name = i.customer_name COLLATE NOCASE
                 LEFT JOIN invoice_payments AS p
                   ON p.document_kind = i.document_kind
                  AND p.invoice_no = i.invoice_no
@@ -3408,13 +3470,17 @@ class InvoiceApp(QMainWindow):
                 GROUP BY i.id
                 HAVING {paid_filter}
                    (COALESCE(i.customer_name, '') LIKE ?
-                    OR CAST(i.invoice_no AS TEXT) LIKE ?)
+                    OR CAST(i.invoice_no AS TEXT) LIKE ?
+                    OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                        COALESCE(NULLIF(i.customer_mobile, ''), bp.mobile, ''),
+                        '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '') LIKE ?)
                 ORDER BY i.invoice_date DESC, i.invoice_no DESC
                 """,
                 (
                     int(self.pending_invoice_private),
                     search_pattern,
                     search_pattern,
+                    mobile_pattern,
                 ),
             ).fetchall()
 
@@ -3476,7 +3542,7 @@ class InvoiceApp(QMainWindow):
         toolbar = QHBoxLayout()
         self.quotation_search = QLineEdit()
         self.quotation_search.setPlaceholderText(
-            "Search customer or quotation number"
+            "Search customer, quotation number, or buyer mobile"
         )
         self.quotation_search.textChanged.connect(
             lambda value: self.reset_quotation_page()
@@ -3556,18 +3622,31 @@ class InvoiceApp(QMainWindow):
         if not hasattr(self, "quotation_table"):
             return
 
-        search_pattern = f"%{self.quotation_search.text().strip()}%"
+        search = self.quotation_search.text().strip()
+        search_pattern = f"%{search}%"
+        search_digits = re.sub(r"\D", "", search)
+        if len(search_digits) == 12 and search_digits.startswith("91"):
+            search_digits = search_digits[2:]
+        elif len(search_digits) == 11 and search_digits.startswith("0"):
+            search_digits = search_digits[1:]
+        mobile_pattern = f"%{search_digits}%" if search_digits else "%NO_DIGITS%"
         with sqlite3.connect(DB_PATH) as con:
             rows = con.execute(
                 """
-                SELECT invoice_no, invoice_date, customer_name, grand_total
-                FROM invoices
-                WHERE document_kind = 'QUOTATION'
-                  AND (COALESCE(customer_name, '') LIKE ?
-                       OR CAST(invoice_no AS TEXT) LIKE ?)
+                SELECT i.invoice_no, i.invoice_date, i.customer_name,
+                       i.grand_total
+                FROM invoices AS i
+                LEFT JOIN buyer_profiles AS bp
+                  ON bp.name = i.customer_name COLLATE NOCASE
+                WHERE i.document_kind = 'QUOTATION'
+                  AND (COALESCE(i.customer_name, '') LIKE ?
+                       OR CAST(i.invoice_no AS TEXT) LIKE ?
+                       OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                           COALESCE(NULLIF(i.customer_mobile, ''), bp.mobile, ''),
+                           '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '') LIKE ?)
                 ORDER BY invoice_date DESC, invoice_no DESC
                 """,
-                (search_pattern, search_pattern),
+                (search_pattern, search_pattern, mobile_pattern),
             ).fetchall()
 
         page_count = max(
@@ -6942,6 +7021,7 @@ class InvoiceApp(QMainWindow):
                     invoice_date.isoformat(),
                     invoice_type,
                     self.customer_name.text(),
+                    self.customer_mobile.text().strip(),
                     float(total),
                     str(output),
                     document_kind,
@@ -6958,7 +7038,7 @@ class InvoiceApp(QMainWindow):
                         """
                         UPDATE invoices
                         SET invoice_date = ?, invoice_type = ?, customer_name = ?,
-                            grand_total = ?, xlsx_path = ?, document_kind = ?,
+                            customer_mobile = ?, grand_total = ?, xlsx_path = ?, document_kind = ?,
                             qr_scanner_path = ?, payment_address = ?, is_private = ?
                         WHERE invoice_no = ? AND document_kind = ?
                         """,
@@ -6968,10 +7048,11 @@ class InvoiceApp(QMainWindow):
                     con.execute(
                         """
                         INSERT INTO invoices (
-                            invoice_date, invoice_type, customer_name, grand_total,
+                            invoice_date, invoice_type, customer_name, customer_mobile,
+                            grand_total,
                             xlsx_path, document_kind, qr_scanner_path, payment_address,
                             is_private, invoice_no
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         values,
                     )
