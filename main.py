@@ -3491,6 +3491,14 @@ class InvoiceApp(QMainWindow):
         self.delete_payment_button.clicked.connect(self.delete_selected_invoice_payment)
         self.edit_payment_button.setEnabled(False)
         self.delete_payment_button.setEnabled(False)
+        self.invoice_payment_summary = QLabel(
+            "Save the invoice before recording payments."
+        )
+        self.invoice_payment_summary.setWordWrap(True)
+        self.invoice_payment_summary.setStyleSheet(
+            "font-weight: 600; color: #193f4c;"
+        )
+        invoice_payments_layout.addWidget(self.invoice_payment_summary)
         payment_actions = QHBoxLayout()
         payment_actions.addWidget(self.record_payment_button)
         payment_actions.addWidget(self.edit_payment_button)
@@ -3502,8 +3510,6 @@ class InvoiceApp(QMainWindow):
         self.view_receipt_screenshot_button.setEnabled(False)
         payment_actions.addWidget(self.view_receipt_screenshot_button)
         payment_actions.addStretch()
-        self.invoice_payment_summary = QLabel("Save the invoice before recording payments.")
-        payment_actions.addWidget(self.invoice_payment_summary, 1)
         invoice_payments_layout.addLayout(payment_actions)
         self.invoice_payments_table = QTableWidget(0, 5)
         self.invoice_payments_table.setHorizontalHeaderLabels(
@@ -3513,12 +3519,23 @@ class InvoiceApp(QMainWindow):
             QTableWidget.EditTrigger.NoEditTriggers
         )
         self.invoice_payments_table.verticalHeader().setVisible(False)
-        self.invoice_payments_table.horizontalHeader().setSectionResizeMode(
+        payments_header = self.invoice_payments_table.horizontalHeader()
+        for column in (0, 1, 2):
+            payments_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        payments_header.setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch
         )
-        self.invoice_payments_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.ResizeToContents
+        payments_header.setSectionResizeMode(
+            4, QHeaderView.ResizeMode.Interactive
         )
+        for column, width in ((0, 90), (1, 105), (2, 110), (3, 165), (4, 105)):
+            self.invoice_payments_table.setColumnWidth(column, width)
+        self.invoice_payments_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.invoice_payments_table.setWordWrap(False)
         self.invoice_payments_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
