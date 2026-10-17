@@ -6383,7 +6383,13 @@ class InvoiceApp(QMainWindow):
                         "This QR covers the current invoice only; the previous "
                         "balances listed above are not included."
                     )
-            message_lines.extend(("", "Regards,", self.seller_name.text()))
+            message_lines.extend((
+                "",
+                "Once payment is complete, please share the payment screenshot.",
+                "",
+                "Regards,",
+                self.seller_name.text(),
+            ))
             message = "\n".join(message_lines)
         opened = self.open_whatsapp_chat(mobile, message)
         attachment_names = " and ".join(path.name for path in attachment_paths)
