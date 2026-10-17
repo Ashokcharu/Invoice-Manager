@@ -6299,14 +6299,28 @@ class InvoiceApp(QMainWindow):
                 f"Regards,\n{self.seller_name.text()}"
             )
         else:
+            paid_percent = (
+                paid_total / invoice_total * 100
+                if invoice_total > 0 else Decimal("0")
+            )
+            due_percent = (
+                balance_due / invoice_total * 100
+                if invoice_total > 0 else Decimal("0")
+            )
+            request_due_percent = (
+                request_amount / balance_due * 100
+                if balance_due > 0 else Decimal("0")
+            )
             message_lines = [
                 f"Hello {greeting},",
                 "",
                 f"Invoice #{invoice_no}",
                 f"Total: INR {invoice_total:.2f}",
-                f"Received: INR {paid_total:.2f}",
-                f"Due: INR {balance_due:.2f}",
-                f"Payment request ({request_percent:g}%): INR {request_amount:.2f}",
+                f"Paid: INR {paid_total:.2f} ({paid_percent:.2f}% of invoice)",
+                f"Remaining balance: INR {balance_due:.2f} "
+                f"({due_percent:.2f}% of invoice)",
+                f"Requested now: INR {request_amount:.2f} "
+                f"({request_due_percent:.2f}% of remaining balance)",
             ]
             if previous_open_invoices:
                 previous_balance = sum(
@@ -6355,12 +6369,20 @@ class InvoiceApp(QMainWindow):
                     "Scan the separate combined QR attached, not the invoice PDF QR.",
                 ))
             else:
-                message_lines.extend((
-                    "",
-                    f"Combined QR total: INR {request_amount:.2f}",
-                    "Payment QR covers the current invoice request only; "
-                    "previous balances are not included.",
-                ))
+                message_lines.append("")
+                if qr_path and qr_path.is_file():
+                    message_lines.append(
+                        "Please scan the payment QR to pay the requested amount."
+                    )
+                else:
+                    message_lines.append(
+                        "Please pay the requested amount toward this invoice."
+                    )
+                if previous_open_invoices:
+                    message_lines.append(
+                        "This QR covers the current invoice only; the previous "
+                        "balances listed above are not included."
+                    )
             message_lines.extend(("", "Regards,", self.seller_name.text()))
             message = "\n".join(message_lines)
         opened = self.open_whatsapp_chat(mobile, message)
