@@ -114,6 +114,21 @@ def money(value):
     )
 
 
+def allocate_receipt_across_invoices(amount, invoice_limits):
+    remaining = money(amount)
+    allocations = []
+    for invoice_no, limit in invoice_limits:
+        allocated = min(remaining, money(limit))
+        if allocated > 0:
+            allocations.append((invoice_no, allocated))
+            remaining = money(remaining - allocated)
+        if remaining <= 0:
+            break
+    if remaining > 0:
+        raise ValueError("Receipt amount exceeds the selected invoice balances.")
+    return allocations
+
+
 def invoice_item_row_shift(sheet):
     item_count = 0
     while sheet.cell(18 + item_count, 2).value:
@@ -598,10 +613,11 @@ class InvoiceApp(QMainWindow):
         """)
 
 
-    def spinbox_with_arrows(self, spinbox, step_size=1):
+    def spinbox_with_arrows(self, spinbox, step_size=1, button_height=16):
 
         spinbox.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         container = QWidget()
+        container.setMinimumHeight(button_height * 2 + 4)
         container_layout = QHBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
@@ -618,7 +634,7 @@ class InvoiceApp(QMainWindow):
             button = QToolButton()
             button.setArrowType(arrow_type)
             button.setToolTip(tooltip)
-            button.setFixedSize(22, 16)
+            button.setFixedSize(24, button_height)
             button.setStyleSheet(
                 "QToolButton { background: #eaf1f8; color: #173b57; "
                 "border: 1px solid #bdc9d8; padding: 0; }"
@@ -628,6 +644,7 @@ class InvoiceApp(QMainWindow):
                 lambda checked=False, amount=step: spinbox.stepBy(amount)
             )
             buttons_layout.addWidget(button)
+        buttons.setMinimumHeight(button_height * 2)
         container_layout.addWidget(buttons)
         return container
 
@@ -1324,14 +1341,14 @@ class InvoiceApp(QMainWindow):
         self.bank_selector.setCurrentIndex(max(0, profile_index))
 
 
-    def payment_uri(self, invoice_no, amount=None):
+    def payment_uri(self, invoice_no, amount=None, transaction_note=None):
 
         uri = (
             "upi://pay?"
             f"pa={quote(self.bank_upi_id.text().strip())}"
             f"&pn={quote(self.seller_name.text())}"
             "&cu=INR"
-            f"&tn={quote(str(invoice_no))}"
+            f"&tn={quote(str(transaction_note or invoice_no))}"
         )
         if amount is not None:
             uri += f"&am={money(amount):.2f}"
@@ -1829,11 +1846,17 @@ class InvoiceApp(QMainWindow):
         self.finance_tab = QWidget()
         tab_layout = QVBoxLayout(self.finance_tab)
         tab_layout.setContentsMargins(0, 0, 0, 0)
+        self.finance_views = QTabWidget()
+        tab_layout.addWidget(self.finance_views)
+        overview_page = QWidget()
+        overview_layout = QVBoxLayout(overview_page)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         finance_content = QWidget()
         scroll_area.setWidget(finance_content)
-        tab_layout.addWidget(scroll_area)
+        overview_layout.addWidget(scroll_area)
+        self.finance_views.addTab(overview_page, "Overview")
 
         layout = QVBoxLayout(finance_content)
         layout.setContentsMargins(18, 14, 18, 16)
@@ -1982,6 +2005,307 @@ class InvoiceApp(QMainWindow):
         self.finance_month_selector.currentIndexChanged.connect(
             lambda _index: self.refresh_finance_dashboard()
         )
+
+        self.create_finance_receivables_tab()
+        self.finance_views.addTab(self.finance_receivables_tab, "Open invoices")
+
+
+    def create_finance_receivables_tab(self):
+
+        self.finance_receivables_tab = QWidget()
+        layout = QHBoxLayout(self.finance_receivables_tab)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(12)
+
+        invoice_box = QGroupBox("Open invoice balances")
+        invoice_layout = QVBoxLayout(invoice_box)
+        self.finance_receivable_search = QLineEdit()
+        self.finance_receivable_search.setPlaceholderText(
+            "Search invoice number, customer, or mobile"
+        )
+        self.finance_receivable_search.textChanged.connect(
+            self.reset_finance_receivable_page
+        )
+        invoice_layout.addWidget(self.finance_receivable_search)
+        self.finance_receivable_table = QTableWidget(0, 6)
+        self.finance_receivable_table.setHorizontalHeaderLabels(
+            ["Invoice No", "Date", "Customer", "Total", "Received", "Due"]
+        )
+        self.finance_receivable_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.finance_receivable_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.finance_receivable_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.finance_receivable_table.verticalHeader().setVisible(False)
+        self.finance_receivable_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.finance_receivable_table.itemSelectionChanged.connect(
+            self.update_finance_customer_detail
+        )
+        invoice_layout.addWidget(self.finance_receivable_table, 1)
+        pagination = QHBoxLayout()
+        self.finance_receivable_previous = QPushButton("Previous")
+        self.finance_receivable_previous.clicked.connect(
+            lambda checked=False: self.change_finance_receivable_page(-1)
+        )
+        self.finance_receivable_page_label = QLabel("Page 1 of 1")
+        self.finance_receivable_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.finance_receivable_next = QPushButton("Next")
+        self.finance_receivable_next.clicked.connect(
+            lambda checked=False: self.change_finance_receivable_page(1)
+        )
+        pagination.addWidget(self.finance_receivable_previous)
+        pagination.addWidget(self.finance_receivable_page_label, 1)
+        pagination.addWidget(self.finance_receivable_next)
+        invoice_layout.addLayout(pagination)
+        layout.addWidget(invoice_box, 3)
+
+        customer_box = QGroupBox("Customer exposure")
+        customer_layout = QVBoxLayout(customer_box)
+        self.finance_customer_title = QLabel("Select an open invoice")
+        self.finance_customer_title.setFont(
+            QFont("Segoe UI", 13, QFont.Weight.DemiBold)
+        )
+        self.finance_customer_title.setWordWrap(True)
+        customer_layout.addWidget(self.finance_customer_title)
+        self.finance_customer_summary = QLabel(
+            "Matching invoices are grouped by buyer mobile number."
+        )
+        self.finance_customer_summary.setWordWrap(True)
+        customer_layout.addWidget(self.finance_customer_summary)
+        self.finance_customer_chart = FinanceDonutChart()
+        customer_layout.addWidget(self.finance_customer_chart)
+        self.finance_customer_chart_legend = QLabel(
+            "Received: ₹0.00 · Due: ₹0.00"
+        )
+        self.finance_customer_chart_legend.setWordWrap(True)
+        customer_layout.addWidget(self.finance_customer_chart_legend)
+        self.finance_customer_invoices = QTableWidget(0, 3)
+        self.finance_customer_invoices.setHorizontalHeaderLabels(
+            ["Open invoice", "Date", "Balance due"]
+        )
+        self.finance_customer_invoices.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.finance_customer_invoices.verticalHeader().setVisible(False)
+        self.finance_customer_invoices.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.finance_customer_invoices.cellDoubleClicked.connect(
+            lambda row, column: self.open_selected_finance_customer_invoice()
+        )
+        customer_layout.addWidget(self.finance_customer_invoices, 1)
+        self.open_finance_customer_invoice_button = QPushButton(
+            "Open invoice to request or record payment"
+        )
+        self.open_finance_customer_invoice_button.clicked.connect(
+            self.open_selected_finance_customer_invoice
+        )
+        customer_layout.addWidget(self.open_finance_customer_invoice_button)
+        layout.addWidget(customer_box, 2)
+
+        self.finance_receivable_page = 0
+        self.finance_receivable_page_size = 20
+        self.finance_all_open_receivable_rows = []
+        self.finance_open_receivable_rows = []
+        self.finance_receivable_page_rows = []
+        self.refresh_finance_receivables()
+
+
+    def finance_receivable_rows(self):
+
+        with sqlite3.connect(DB_PATH) as con:
+            rows = con.execute(
+                """
+                SELECT i.invoice_no, i.is_private, i.invoice_date,
+                       COALESCE(i.customer_name, ''),
+                       COALESCE(NULLIF(i.customer_mobile, ''), bp.mobile, ''),
+                       COALESCE(i.grand_total, 0), COALESCE(SUM(p.amount), 0)
+                FROM invoices AS i
+                LEFT JOIN buyer_profiles AS bp
+                  ON bp.name = i.customer_name COLLATE NOCASE
+                LEFT JOIN invoice_payments AS p
+                  ON p.document_kind = i.document_kind
+                 AND p.invoice_no = i.invoice_no
+                WHERE i.document_kind = 'INVOICE'
+                GROUP BY i.id
+                ORDER BY i.invoice_date DESC, i.invoice_no DESC
+                """
+            ).fetchall()
+
+        result = []
+        for number, is_private, invoice_date, customer, mobile, total, received in rows:
+            total = money(total or 0)
+            received = money(received or 0)
+            balance = max(Decimal("0.00"), money(total - received))
+            result.append({
+                "number": number,
+                "private": bool(is_private),
+                "date": invoice_date or "",
+                "customer": customer.strip() or "Unnamed buyer",
+                "mobile": normalize_indian_mobile(mobile),
+                "total": total,
+                "received": received,
+                "balance": balance,
+            })
+        return result
+
+
+    def reset_finance_receivable_page(self):
+
+        self.finance_receivable_page = 0
+        self.refresh_finance_receivables()
+
+
+    def change_finance_receivable_page(self, offset):
+
+        self.finance_receivable_page += offset
+        self.refresh_finance_receivables()
+
+
+    def refresh_finance_receivables(self):
+
+        if not hasattr(self, "finance_receivable_table"):
+            return
+        all_open_rows = [
+            row for row in self.finance_receivable_rows()
+            if row["balance"] > Decimal("0.005")
+        ]
+        self.finance_all_open_receivable_rows = all_open_rows
+        search = self.finance_receivable_search.text().strip().casefold()
+        if search:
+            digits = re.sub(r"\D", "", search)
+            all_open_rows = [
+                row for row in all_open_rows
+                if search in str(row["number"]).casefold()
+                or search in row["customer"].casefold()
+                or (digits and digits in row["mobile"])
+            ]
+        self.finance_open_receivable_rows = all_open_rows
+        page_count = max(
+            1,
+            (len(all_open_rows) + self.finance_receivable_page_size - 1)
+            // self.finance_receivable_page_size,
+        )
+        self.finance_receivable_page = min(
+            max(0, self.finance_receivable_page), page_count - 1
+        )
+        start = self.finance_receivable_page * self.finance_receivable_page_size
+        page_rows = all_open_rows[start:start + self.finance_receivable_page_size]
+        self.finance_receivable_page_rows = page_rows
+        self.finance_receivable_table.setRowCount(len(page_rows))
+        for row_index, row in enumerate(page_rows):
+            values = (
+                str(row["number"]),
+                QDate.fromString(row["date"], "yyyy-MM-dd").toString("dd/MM/yyyy"),
+                row["customer"],
+                f"₹{row['total']:,.2f}",
+                f"₹{row['received']:,.2f}",
+                f"₹{row['balance']:,.2f}",
+            )
+            for column, value in enumerate(values):
+                self.finance_receivable_table.setItem(
+                    row_index, column, QTableWidgetItem(value)
+                )
+        self.finance_receivable_page_label.setText(
+            f"Page {self.finance_receivable_page + 1} of {page_count} · "
+            f"{len(all_open_rows)} open invoice(s)"
+        )
+        self.finance_receivable_previous.setEnabled(
+            self.finance_receivable_page > 0
+        )
+        self.finance_receivable_next.setEnabled(
+            self.finance_receivable_page + 1 < page_count
+        )
+        if page_rows:
+            self.finance_receivable_table.selectRow(0)
+            self.update_finance_customer_detail()
+        else:
+            self.finance_customer_title.setText("No open invoices")
+            self.finance_customer_summary.setText(
+                "No unpaid invoice balances match this search."
+            )
+            self.finance_customer_chart.set_values(0, 0)
+            self.finance_customer_chart_legend.setText(
+                "Received: ₹0.00 · Due: ₹0.00"
+            )
+            self.finance_customer_invoices.setRowCount(0)
+            self.open_finance_customer_invoice_button.setEnabled(False)
+
+
+    def update_finance_customer_detail(self):
+
+        row_index = self.finance_receivable_table.currentRow()
+        if not 0 <= row_index < len(self.finance_receivable_page_rows):
+            return
+        selected = self.finance_receivable_page_rows[row_index]
+        mobile = selected["mobile"]
+        if mobile:
+            customer_rows = [
+                row for row in self.finance_all_open_receivable_rows
+                if row["mobile"] == mobile
+            ]
+            match_note = f"Invoices matched by mobile · {mobile}"
+        else:
+            customer_rows = [selected]
+            match_note = "No valid mobile saved; showing this invoice only"
+        customer_balance = sum(
+            (row["balance"] for row in customer_rows), Decimal("0.00")
+        )
+        customer_received = sum(
+            (min(row["received"], row["total"]) for row in customer_rows),
+            Decimal("0.00"),
+        )
+        self.finance_customer_title.setText(selected["customer"])
+        self.finance_customer_summary.setText(
+            f"{match_note}\n{len(customer_rows)} open invoice(s) · "
+            f"Total due ₹{customer_balance:,.2f}"
+        )
+        self.finance_customer_chart.set_values(
+            float(customer_received), float(customer_balance)
+        )
+        self.finance_customer_chart_legend.setText(
+            f"Received: ₹{customer_received:,.2f} · "
+            f"Due: ₹{customer_balance:,.2f}"
+        )
+        self.finance_customer_invoices.setRowCount(len(customer_rows))
+        for index, row in enumerate(customer_rows):
+            invoice_label = f"#{row['number']}"
+            if row["private"]:
+                invoice_label += " (Private)"
+            values = (
+                invoice_label,
+                QDate.fromString(row["date"], "yyyy-MM-dd").toString("dd/MM/yyyy"),
+                f"₹{row['balance']:,.2f}",
+            )
+            for column, value in enumerate(values):
+                self.finance_customer_invoices.setItem(
+                    index, column, QTableWidgetItem(value)
+                )
+        self.finance_customer_invoices.selectRow(0)
+        self.open_finance_customer_invoice_button.setEnabled(bool(customer_rows))
+
+
+    def open_selected_finance_customer_invoice(self):
+
+        row = self.finance_customer_invoices.currentRow()
+        if row < 0:
+            return
+        invoice_label = self.finance_customer_invoices.item(row, 0)
+        if not invoice_label:
+            return
+        match = re.search(r"\d+", invoice_label.text())
+        if not match:
+            return
+        self.document_kind.setCurrentIndex(0)
+        self.invoice_no.setText(match.group())
+        self.load_invoice()
+        self.main_tabs.setCurrentWidget(self.invoice_tab)
 
 
     def sync_sidebar_navigation(self, index):
@@ -2293,6 +2617,8 @@ class InvoiceApp(QMainWindow):
                 self.finance_debtors_table.setItem(
                     row, column, QTableWidgetItem(value)
                 )
+
+            self.refresh_finance_receivables()
 
         return
 
@@ -3038,6 +3364,9 @@ class InvoiceApp(QMainWindow):
         self.payment_request_amount.valueChanged.connect(
             lambda value: self.refresh_payment_request(source="amount")
         )
+        self.customer_mobile.textChanged.connect(
+            self.refresh_previous_invoice_balances
+        )
         receipt_form.addWidget(
             self.spinbox_with_arrows(self.payment_request_amount), 0, 3
         )
@@ -3085,6 +3414,42 @@ class InvoiceApp(QMainWindow):
         receipt_form.setColumnStretch(1, 1)
         receipt_form.setColumnStretch(3, 1)
         invoice_payments_layout.addLayout(receipt_form)
+        self.previous_invoice_balances_box = QGroupBox(
+            "Add previous invoice balances to this request"
+        )
+        previous_balance_layout = QVBoxLayout(
+            self.previous_invoice_balances_box
+        )
+        self.previous_invoice_balances_table = QTableWidget(0, 5)
+        self.previous_invoice_balances_table.setHorizontalHeaderLabels(
+            ["Include", "Invoice No", "Date", "Balance due", "Collect"]
+        )
+        self.previous_invoice_balances_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.previous_invoice_balances_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.previous_invoice_balances_table.verticalHeader().setVisible(False)
+        self.previous_invoice_balances_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Interactive
+        )
+        for column, width in enumerate((78, 170, 120, 145, 185)):
+            self.previous_invoice_balances_table.setColumnWidth(column, width)
+        self.previous_invoice_balances_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.previous_invoice_balances_table.setMaximumHeight(150)
+        previous_balance_layout.addWidget(self.previous_invoice_balances_table)
+        self.combined_payment_summary = QLabel(
+            "Combined scanner total: ₹0.00"
+        )
+        self.combined_payment_summary.setWordWrap(True)
+        self.combined_payment_summary.setStyleSheet(
+            "font-weight: 600; color: #193f4c;"
+        )
+        previous_balance_layout.addWidget(self.combined_payment_summary)
+        invoice_payments_layout.addWidget(self.previous_invoice_balances_box)
         self.record_payment_button = QPushButton("Record Payment")
         self.record_payment_button.clicked.connect(self.record_invoice_payment)
         self.record_payment_button.setMaximumWidth(160)
@@ -4115,6 +4480,7 @@ class InvoiceApp(QMainWindow):
             return
 
         self.invoice_payments_table.setRowCount(0)
+        self.refresh_previous_invoice_balances()
         if document_kind_for_selection(self.document_kind.currentIndex()) != "INVOICE":
             self.record_payment_button.setEnabled(False)
             self.invoice_payment_summary.setText(
@@ -4189,6 +4555,178 @@ class InvoiceApp(QMainWindow):
         self.refresh_payment_request()
 
 
+    def refresh_previous_invoice_balances(self):
+
+        if not hasattr(self, "previous_invoice_balances_table"):
+            return
+        table = self.previous_invoice_balances_table
+        previous_rows = getattr(self, "_previous_invoice_rows", [])
+        previous_amount_fields = getattr(
+            self, "_previous_invoice_amount_fields", {}
+        )
+        previous_selection = {
+            previous_rows[row]["number"]: previous_amount_fields[
+                previous_rows[row]["number"]
+            ].value()
+            for row in range(table.rowCount())
+            if row < len(previous_rows)
+            and isinstance(table.cellWidget(row, 0), QCheckBox)
+            and table.cellWidget(row, 0).isChecked()
+            and previous_rows[row]["number"] in previous_amount_fields
+        }
+        mobile = normalize_indian_mobile(self.customer_mobile.text())
+        if mobile != getattr(self, "_previous_balance_mobile", None):
+            previous_selection.clear()
+            self._previous_balance_mobile = mobile
+
+        current_number = (
+            int(self.invoice_no.text())
+            if self.invoice_no.text().strip().isdigit() else None
+        )
+        open_rows = []
+        if mobile and document_kind_for_selection(
+            self.document_kind.currentIndex()
+        ) == "INVOICE":
+            with sqlite3.connect(DB_PATH) as con:
+                rows = con.execute(
+                    """
+                    SELECT i.invoice_no, i.invoice_date, COALESCE(i.customer_name, ''),
+                           COALESCE(NULLIF(i.customer_mobile, ''), bp.mobile, ''),
+                           COALESCE(i.grand_total, 0), COALESCE(SUM(p.amount), 0)
+                    FROM invoices AS i
+                    LEFT JOIN buyer_profiles AS bp
+                      ON bp.name = i.customer_name COLLATE NOCASE
+                    LEFT JOIN invoice_payments AS p
+                      ON p.document_kind = i.document_kind
+                     AND p.invoice_no = i.invoice_no
+                    WHERE i.document_kind = 'INVOICE'
+                    GROUP BY i.id
+                    ORDER BY i.invoice_date, i.invoice_no
+                    """
+                ).fetchall()
+            for number, invoice_date, customer, old_mobile, total, received in rows:
+                if number == current_number or normalize_indian_mobile(old_mobile) != mobile:
+                    continue
+                balance = max(
+                    Decimal("0.00"), money(money(total or 0) - money(received or 0))
+                )
+                if balance > Decimal("0.005"):
+                    open_rows.append({
+                        "number": number,
+                        "date": invoice_date or "",
+                        "customer": customer.strip() or "Unnamed buyer",
+                        "balance": balance,
+                    })
+
+        self._previous_invoice_rows = open_rows
+        self._previous_invoice_amount_fields = {}
+        table.blockSignals(True)
+        table.setRowCount(len(open_rows))
+        for row_index, invoice in enumerate(open_rows):
+            include_checkbox = QCheckBox()
+            include_checkbox.setStyleSheet(
+                "QCheckBox::indicator { width: 22px; height: 22px; }"
+            )
+            include_checkbox.setToolTip(
+                "Include this invoice balance in the combined payment request"
+            )
+            include_checkbox.setChecked(
+                invoice["number"] in previous_selection
+            )
+            table.setCellWidget(row_index, 0, include_checkbox)
+            amount_field = AmountEntryDoubleSpinBox()
+            amount_field.setRange(0.01, float(invoice["balance"]))
+            amount_field.setDecimals(2)
+            amount_field.setPrefix("₹ ")
+            amount_field.setToolTip(
+                "Amount to collect from this invoice; defaults to 100% of its balance"
+            )
+            amount_field.setValue(float(min(
+                invoice["balance"],
+                previous_selection.get(invoice["number"], invoice["balance"]),
+            )))
+            amount_field.setEnabled(include_checkbox.isChecked())
+            self._previous_invoice_amount_fields[invoice["number"]] = amount_field
+            table.setCellWidget(
+                row_index, 4,
+                self.spinbox_with_arrows(amount_field, button_height=20),
+            )
+            table.setRowHeight(row_index, 44)
+            include_checkbox.toggled.connect(
+                lambda checked, field=amount_field:
+                    self.set_previous_invoice_amount_enabled(field, checked)
+            )
+            amount_field.valueChanged.connect(
+                self.refresh_combined_payment_summary
+            )
+            values = (
+                str(invoice["number"]),
+                QDate.fromString(invoice["date"], "yyyy-MM-dd").toString("dd/MM/yyyy"),
+                f"₹{invoice['balance']:,.2f}",
+            )
+            for column, value in enumerate(values, start=1):
+                table.setItem(row_index, column, QTableWidgetItem(value))
+        table.blockSignals(False)
+        self.previous_invoice_balances_box.setVisible(bool(open_rows))
+        self.refresh_combined_payment_summary()
+
+
+    def set_previous_invoice_amount_enabled(self, amount_field, enabled):
+
+        amount_field.setEnabled(enabled)
+        self.refresh_combined_payment_summary()
+
+
+    def selected_previous_invoice_balances(self):
+
+        selected_numbers = {
+            self._previous_invoice_rows[row]["number"]
+            for row in range(self.previous_invoice_balances_table.rowCount())
+            if row < len(getattr(self, "_previous_invoice_rows", []))
+            and isinstance(
+                self.previous_invoice_balances_table.cellWidget(row, 0), QCheckBox
+            )
+            and self.previous_invoice_balances_table.cellWidget(row, 0).isChecked()
+        }
+        return [
+            dict(invoice, collect_amount=money(
+                self._previous_invoice_amount_fields[invoice["number"]].value()
+            ))
+            for row, invoice in enumerate(
+                getattr(self, "_previous_invoice_rows", [])
+            )
+            if invoice["number"] in selected_numbers
+        ]
+
+
+    def refresh_combined_payment_summary(self, *_args):
+
+        if not hasattr(self, "combined_payment_summary"):
+            return
+        current_amount = money(self.payment_request_amount.value())
+        selected = self.selected_previous_invoice_balances()
+        previous_amount = sum(
+            (invoice["collect_amount"] for invoice in selected), Decimal("0.00")
+        )
+        combined_amount = money(current_amount + previous_amount)
+        receipt_amount = money(self.receipt_amount.value())
+        if (
+            not self._receipt_amount_manual_override
+            or receipt_amount == self._auto_receipt_amount
+        ):
+            self._updating_receipt_amount = True
+            self.receipt_amount.setValue(float(combined_amount))
+            self._updating_receipt_amount = False
+            self._auto_receipt_amount = combined_amount
+        self.combined_payment_summary.setText(
+            f"Current request ₹{current_amount:,.2f} + "
+            f"{len(selected)} previous invoice(s) ₹{previous_amount:,.2f} "
+            f"= Combined scanner ₹{combined_amount:,.2f}\n"
+            "Combined receipts allocate to this invoice first, then selected "
+            "older invoices from oldest to newest."
+        )
+
+
     def refresh_payment_request(self, source=None):
 
         if not hasattr(self, "payment_request_amount"):
@@ -4246,6 +4784,7 @@ class InvoiceApp(QMainWindow):
             self.receipt_amount.setValue(float(requested_amount))
             self._updating_receipt_amount = False
             self._auto_receipt_amount = requested_amount
+        self.refresh_combined_payment_summary()
 
 
     def adjust_payment_request_to_balance(self):
@@ -4524,6 +5063,80 @@ class InvoiceApp(QMainWindow):
         return True
 
 
+    def refresh_saved_invoice_payment_summary(self, invoice_no):
+
+        with sqlite3.connect(DB_PATH) as con:
+            invoice = con.execute(
+                """
+                SELECT invoice_date, grand_total, is_private, xlsx_path, pdf_path,
+                       (SELECT COALESCE(SUM(amount), 0) FROM invoice_payments
+                        WHERE document_kind = 'INVOICE'
+                          AND invoice_no = invoices.invoice_no)
+                FROM invoices
+                WHERE invoice_no = ? AND document_kind = 'INVOICE'
+                """,
+                (invoice_no,),
+            ).fetchone()
+        if not invoice:
+            return False
+
+        invoice_date, raw_total, is_private, raw_xlsx, raw_pdf, raw_paid = invoice
+        xlsx_path = Path(raw_xlsx) if raw_xlsx else None
+        pdf_path = Path(raw_pdf) if raw_pdf else None
+        if not xlsx_path or not xlsx_path.is_file():
+            return False
+        total = money(raw_total or 0)
+        paid = money(raw_paid or 0)
+        recognized_paid = min(total, paid)
+        balance_due = max(Decimal("0.00"), money(total - paid))
+        paid_percent = (
+            money(recognized_paid / total * 100)
+            if total > 0 else Decimal("0.00")
+        )
+
+        try:
+            workbook = load_workbook(xlsx_path)
+            try:
+                sheet = workbook.active
+                summary_row = 44 + invoice_item_row_shift(sheet)
+                merged_ranges = {
+                    str(cell_range) for cell_range in sheet.merged_cells.ranges
+                }
+                payment_column = (
+                    "G" if f"G{summary_row}:H{summary_row}" in merged_ranges
+                    else "H"
+                )
+                sheet[f"{payment_column}{summary_row + 1}"] = (
+                    f"Total paid: {paid_percent:.2f}% / INR {recognized_paid:.2f}"
+                )
+                sheet[f"{payment_column}{summary_row + 2}"] = (
+                    f"Balance due: INR {balance_due:.2f}"
+                )
+                workbook.save(xlsx_path)
+            finally:
+                workbook.close()
+
+            if pdf_path:
+                self.export_xlsx_to_pdf(xlsx_path, pdf_path)
+                if EXTERNAL_PDF_DIR is not None and invoice_date:
+                    date = datetime.strptime(invoice_date, "%Y-%m-%d").date()
+                    series_folder = "Private" if is_private else "Invoices"
+                    destination = (
+                        EXTERNAL_PDF_DIR / f"{series_folder}_PDF_{date.year}"
+                        / date.strftime("%B") / pdf_path.name
+                    )
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(pdf_path, destination)
+                    for old_pdf in EXTERNAL_PDF_DIR.rglob(
+                        f"INV-{invoice_no:04d}_*.pdf"
+                    ):
+                        if old_pdf.resolve() != destination.resolve():
+                            old_pdf.unlink(missing_ok=True)
+        except Exception:
+            return False
+        return True
+
+
     def sync_invoice_request_pdfs(self, invoice_no):
 
         with sqlite3.connect(DB_PATH) as con:
@@ -4710,7 +5323,10 @@ class InvoiceApp(QMainWindow):
         date_field.setCalendarPopup(True)
         date_field.setDisplayFormat("dd/MM/yyyy")
         reference_field = QLineEdit(payment[3])
-        form.addRow("Amount", amount_field)
+        form.addRow(
+            "Amount",
+            self.spinbox_with_arrows(amount_field, button_height=20),
+        )
         form.addRow("Method", method_field)
         form.addRow("Date", date_field)
         form.addRow("Reference", reference_field)
@@ -4825,6 +5441,9 @@ class InvoiceApp(QMainWindow):
             )
             return
 
+        selected_previous = self.selected_previous_invoice_balances()
+        request_amount = money(self.payment_request_amount.value())
+        current_mobile = normalize_indian_mobile(self.customer_mobile.text())
         with sqlite3.connect(DB_PATH) as con:
             invoice = con.execute(
                 "SELECT grand_total FROM invoices "
@@ -4839,28 +5458,122 @@ class InvoiceApp(QMainWindow):
                 """,
                 (invoice_no,),
             ).fetchone()[0]
-            balance_due = money(Decimal(str(invoice[0] or 0)) - Decimal(str(paid_total)))
-            if amount > balance_due:
+            balance_due = max(
+                Decimal("0.00"),
+                money(Decimal(str(invoice[0] or 0)) - Decimal(str(paid_total))),
+            )
+            current_limit = min(request_amount, balance_due) if selected_previous else balance_due
+            invoice_limits = [(invoice_no, current_limit)]
+            invalid_previous = None
+            for previous in selected_previous:
+                previous_row = con.execute(
+                    """
+                    SELECT COALESCE(i.grand_total, 0),
+                           COALESCE(SUM(p.amount), 0),
+                           COALESCE(NULLIF(i.customer_mobile, ''), bp.mobile, '')
+                    FROM invoices AS i
+                    LEFT JOIN buyer_profiles AS bp
+                      ON bp.name = i.customer_name COLLATE NOCASE
+                    LEFT JOIN invoice_payments AS p
+                      ON p.document_kind = i.document_kind
+                     AND p.invoice_no = i.invoice_no
+                    WHERE i.invoice_no = ? AND i.document_kind = 'INVOICE'
+                    GROUP BY i.id
+                    """,
+                    (previous["number"],),
+                ).fetchone()
+                if (
+                    not previous_row
+                    or not current_mobile
+                    or normalize_indian_mobile(previous_row[2]) != current_mobile
+                ):
+                    invalid_previous = previous["number"]
+                    break
+                previous_balance = max(
+                    Decimal("0.00"),
+                    money(
+                        money(previous_row[0]) - money(previous_row[1])
+                    ),
+                )
+                invoice_limits.append((
+                    previous["number"],
+                    min(previous["collect_amount"], previous_balance),
+                ))
+
+            if invalid_previous is not None:
                 QMessageBox.warning(
                     self,
-                    "Payment Exceeds Balance",
-                    f"The balance due is ₹{balance_due:,.2f}.",
+                    "Previous Invoice Changed",
+                    f"Invoice #{invalid_previous} is no longer available for "
+                    "this buyer. Refresh the invoice receipts and try again.",
+                )
+                self.refresh_invoice_payments()
+                return
+
+            available_amount = sum(
+                (money(limit) for _, limit in invoice_limits), Decimal("0.00")
+            )
+            if amount > available_amount:
+                QMessageBox.warning(
+                    self,
+                    "Payment Exceeds Selected Amount",
+                    f"The entered receipt is ₹{amount:,.2f}, but the selected "
+                    f"invoice amounts total ₹{available_amount:,.2f}.",
                 )
                 return
 
-            con.execute(
+        try:
+            allocations = allocate_receipt_across_invoices(
+                amount, invoice_limits
+            )
+        except ValueError as error:
+            QMessageBox.warning(self, "Invalid Receipt Allocation", str(error))
+            return
+
+        if selected_previous:
+            allocation_text = "\n".join(
+                f"Invoice #{number}: ₹{allocated:,.2f}"
+                for number, allocated in allocations
+            )
+            answer = QMessageBox.question(
+                self,
+                "Confirm Combined Receipt",
+                "This receipt will be recorded as separate invoice payments, "
+                "current invoice first, then selected older invoices:\n\n"
+                f"{allocation_text}\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        invoice_numbers = [number for number, _ in allocations]
+        receipt_reference = self.receipt_reference.text().strip()
+        if selected_previous:
+            allocation_reference = "Combined payment: " + ", ".join(
+                f"#{number}" for number in invoice_numbers
+            )
+            receipt_reference = (
+                f"{receipt_reference} · {allocation_reference}"
+                if receipt_reference else allocation_reference
+            )
+        with sqlite3.connect(DB_PATH) as con:
+            con.executemany(
                 """
                 INSERT INTO invoice_payments (
                     document_kind, invoice_no, paid_on, amount, method, reference
                 ) VALUES ('INVOICE', ?, ?, ?, ?, ?)
                 """,
-                (
-                    invoice_no,
-                    self.receipt_date.date().toString("yyyy-MM-dd"),
-                    float(amount),
-                    self.receipt_method.currentText(),
-                    self.receipt_reference.text().strip(),
-                ),
+                [
+                    (
+                        target_invoice_no,
+                        self.receipt_date.date().toString("yyyy-MM-dd"),
+                        float(allocated),
+                        self.receipt_method.currentText(),
+                        receipt_reference,
+                    )
+                    for target_invoice_no, allocated in allocations
+                ],
             )
 
         self.set_payment_fields_to_balance()
@@ -4886,6 +5599,21 @@ class InvoiceApp(QMainWindow):
                 "Request PDF Refresh Failed",
                 "The invoice PDF was updated, but request history PDFs could not be refreshed.",
             )
+        previous_invoice_numbers = [
+            target_invoice_no
+            for target_invoice_no in invoice_numbers
+            if target_invoice_no != invoice_no
+        ]
+        failed_previous_documents = [
+            target_invoice_no
+            for target_invoice_no in previous_invoice_numbers
+            if not self.refresh_saved_invoice_payment_summary(target_invoice_no)
+        ]
+        failed_previous_requests = [
+            target_invoice_no
+            for target_invoice_no in previous_invoice_numbers
+            if not self.sync_invoice_request_pdfs(target_invoice_no)
+        ]
 
         self.reset_receipt_amount_autofill()
         self.receipt_date.setDate(QDate.currentDate())
@@ -4896,8 +5624,26 @@ class InvoiceApp(QMainWindow):
         QMessageBox.information(
             self,
             "Payment Recorded",
-            f"₹{amount:,.2f} received by {self.receipt_method.currentText()}.",
+            f"₹{amount:,.2f} received by {self.receipt_method.currentText()} "
+            f"and allocated across {len(allocations)} invoice(s).",
         )
+        if failed_previous_requests:
+            QMessageBox.warning(
+                self,
+                "Older Invoice Request PDFs Not Refreshed",
+                "Payment records were saved, but request PDFs for invoice(s) "
+                + ", ".join(f"#{number}" for number in failed_previous_requests)
+                + " could not be refreshed.",
+            )
+        if failed_previous_documents:
+            QMessageBox.warning(
+                self,
+                "Older Invoice Files Not Refreshed",
+                "Payment records were saved, but the workbook/PDF balance "
+                "for invoice(s) "
+                + ", ".join(f"#{number}" for number in failed_previous_documents)
+                + " could not be refreshed.",
+            )
 
 
     def document_kind_changed(self, index):
@@ -5006,6 +5752,63 @@ class InvoiceApp(QMainWindow):
                 f"Enter a valid {document_name.lower()} number before sharing.",
             )
             return
+        previous_open_invoices = []
+        normalized_mobile = normalize_indian_mobile(self.customer_mobile.text())
+        if is_invoice and normalized_mobile:
+            with sqlite3.connect(DB_PATH) as con:
+                previous_rows = con.execute(
+                    """
+                    SELECT i.invoice_no, i.is_private, i.invoice_date,
+                           COALESCE(i.customer_name, ''),
+                           COALESCE(NULLIF(i.customer_mobile, ''), bp.mobile, ''),
+                           COALESCE(i.grand_total, 0), COALESCE(SUM(p.amount), 0)
+                    FROM invoices AS i
+                    LEFT JOIN buyer_profiles AS bp
+                      ON bp.name = i.customer_name COLLATE NOCASE
+                    LEFT JOIN invoice_payments AS p
+                      ON p.document_kind = i.document_kind
+                     AND p.invoice_no = i.invoice_no
+                    WHERE i.document_kind = 'INVOICE'
+                      AND i.invoice_no != ?
+                    GROUP BY i.id
+                    ORDER BY i.invoice_date, i.invoice_no
+                    """,
+                    (invoice_no,),
+                ).fetchall()
+            for number, is_private, invoice_date, customer, old_mobile, total, received in previous_rows:
+                if normalize_indian_mobile(old_mobile) != normalized_mobile:
+                    continue
+                old_balance = max(
+                    Decimal("0.00"),
+                    money(money(total or 0) - money(received or 0)),
+                )
+                if old_balance > Decimal("0.005"):
+                    previous_open_invoices.append((
+                        number, bool(is_private), invoice_date,
+                        customer.strip() or "Unnamed buyer", old_balance,
+                    ))
+        selected_previous_amounts = {
+            invoice["number"]: invoice["collect_amount"]
+            for invoice in self.selected_previous_invoice_balances()
+        } if is_invoice else {}
+        selected_previous_numbers = set(selected_previous_amounts)
+        selected_previous_invoices = [
+            (*invoice, selected_previous_amounts[invoice[0]])
+            for invoice in previous_open_invoices
+            if invoice[0] in selected_previous_numbers
+        ]
+        selected_previous_balance = sum(
+            (invoice[5] for invoice in selected_previous_invoices),
+            Decimal("0.00"),
+        )
+        combined_request_amount = money(request_amount + selected_previous_balance)
+        if selected_previous_invoices and not self.bank_upi_id.text().strip():
+            QMessageBox.warning(
+                self,
+                "UPI ID Required",
+                "Add a UPI ID to create one scanner for the selected invoice balances.",
+            )
+            return
         existing_request = None
         if is_invoice:
                         with sqlite3.connect(DB_PATH) as con:
@@ -5081,7 +5884,32 @@ class InvoiceApp(QMainWindow):
                     f"The invoice scanner could not be found:\n{qr_path}",
                 )
                 return
-            attachment_paths.append(qr_path.resolve())
+            if not selected_previous_invoices:
+                attachment_paths.append(qr_path.resolve())
+
+        combined_qr_path = None
+        if selected_previous_invoices:
+            request_folder = Path(pdf_path).parent / "Requests"
+            request_folder.mkdir(parents=True, exist_ok=True)
+            combined_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            combined_qr_path = request_folder / (
+                f"{Path(pdf_path).stem}_COMBINED_{combined_timestamp}_QR.png"
+            )
+            selected_numbers_text = str(invoice_no)
+            for invoice in selected_previous_invoices:
+                candidate = f"{selected_numbers_text},{invoice[0]}"
+                if len(f"Invoices {candidate}") > 80:
+                    break
+                selected_numbers_text = candidate
+            combined_uri = self.payment_uri(
+                invoice_no,
+                combined_request_amount,
+                transaction_note=f"Invoices {selected_numbers_text}",
+            )
+            combined_code = qrcode.QRCode(border=2)
+            combined_code.add_data(combined_uri)
+            combined_code.make(fit=True)
+            combined_code.make_image().save(combined_qr_path)
 
         if is_invoice:
             request_time = datetime.now()
@@ -5155,9 +5983,12 @@ class InvoiceApp(QMainWindow):
             attachment_paths = (
                 [snapshot_pdf_path.resolve()] if attach_invoice else []
             )
-            if snapshot_qr_path:
+            if snapshot_qr_path and not selected_previous_invoices:
                 attachment_paths.append(snapshot_qr_path.resolve())
             self.refresh_invoice_request_history()
+
+        if combined_qr_path:
+            attachment_paths.append(combined_qr_path.resolve())
 
         pdf_mime_data = QMimeData()
         pdf_mime_data.setUrls(
@@ -5176,8 +6007,10 @@ class InvoiceApp(QMainWindow):
         else:
             message_lines = [
                 f"Hello {greeting},",
-                self.seller_name.text(),
                 "",
+                f"Payment details for invoice #{invoice_no}:",
+                "",
+                "CURRENT INVOICE",
                 f"Invoice total: INR {invoice_total:.2f}",
                 f"Payment request ({request_percent:g}%): INR {request_amount:.2f}",
                 f"Received: INR {paid_total:.2f}",
@@ -5186,6 +6019,63 @@ class InvoiceApp(QMainWindow):
                 message_lines.append(f"Balance due: INR {balance_due:.2f}")
             else:
                 message_lines.append("Payment complete")
+            if previous_open_invoices:
+                previous_balance = sum(
+                    (invoice[4] for invoice in previous_open_invoices),
+                    Decimal("0.00"),
+                )
+                message_lines.extend((
+                    "",
+                    "Previous unpaid invoices",
+                ))
+                for old_number, is_private, old_date, old_customer, old_balance in previous_open_invoices:
+                    label = f"Invoice #{old_number}"
+                    if is_private:
+                        label += " (Private)"
+                    formatted_date = (
+                        QDate.fromString(old_date, "yyyy-MM-dd").toString("dd/MM/yyyy")
+                        if old_date else "Date unavailable"
+                    )
+                    message_lines.append(
+                        f"- {label} · {formatted_date} · {old_customer}: "
+                        f"INR {old_balance:.2f} due"
+                        + (
+                            f" · INR {selected_previous_amounts[old_number]:.2f} "
+                            "included in combined scanner"
+                            if old_number in selected_previous_numbers
+                            else ""
+                        )
+                    )
+                message_lines.extend((
+                    f"Previous invoices due: INR {previous_balance:.2f}",
+                    "Total outstanding across current and previous invoices: "
+                    f"INR {balance_due + previous_balance:.2f}",
+                ))
+            if selected_previous_invoices:
+                selected_labels = ", ".join(
+                    f"#{invoice[0]} (INR {invoice[5]:.2f})"
+                    for invoice in selected_previous_invoices
+                )
+                message_lines.extend((
+                    "",
+                    "COMBINED PAYMENT",
+                    f"Current invoice #{invoice_no}: INR {request_amount:.2f}",
+                    f"Previous invoice(s): {selected_labels}",
+                    f"Combined scanner total: INR {combined_request_amount:.2f}",
+                    "Please scan the separate combined QR image attached. "
+                    "Do not scan the QR printed inside the invoice PDF; that "
+                    f"QR is only for invoice #{invoice_no}.",
+                ))
+            elif is_invoice:
+                message_lines.extend((
+                    "",
+                    "PAYMENT",
+                    f"Current invoice request: INR {request_amount:.2f}",
+                    "The payment QR/request is for the current invoice only. "
+                    "Previous invoice balances are listed above but are not "
+                    "included in this scanner.",
+                ))
+            message_lines.extend(("", "Regards,", self.seller_name.text()))
             message = "\n".join(message_lines)
         opened = self.open_whatsapp_chat(mobile, message)
         attachment_names = " and ".join(path.name for path in attachment_paths)
