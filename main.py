@@ -889,6 +889,14 @@ class InvoiceApp(QMainWindow):
                 ON invoice_payments (document_kind, invoice_no)
                 """
             )
+            payment_columns = {
+                row[1] for row in con.execute("PRAGMA table_info(invoice_payments)")
+            }
+            if "proof_path" not in payment_columns:
+                con.execute(
+                    "ALTER TABLE invoice_payments ADD COLUMN "
+                    "proof_path TEXT NOT NULL DEFAULT ''"
+                )
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS invoice_requests (
@@ -3358,6 +3366,9 @@ class InvoiceApp(QMainWindow):
         self.payment_request_amount.setRange(0, 999999999.99)
         self.payment_request_amount.setDecimals(2)
         self.payment_request_amount.setPrefix("₹ ")
+        self.payment_request_amount.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
         self.payment_request_amount.setToolTip(
             "Enter the amount to request, up to the balance due. Its invoice percentage updates automatically."
         )
@@ -3367,9 +3378,7 @@ class InvoiceApp(QMainWindow):
         self.customer_mobile.textChanged.connect(
             self.refresh_previous_invoice_balances
         )
-        receipt_form.addWidget(
-            self.spinbox_with_arrows(self.payment_request_amount), 0, 3
-        )
+        receipt_form.addWidget(self.payment_request_amount, 0, 3)
         self.remaining_percent_label = QLabel("Balance remaining: 100%")
         receipt_form.addWidget(QLabel("Invoice balance"), 1, 0)
         receipt_form.addWidget(self.remaining_percent_label, 1, 1, 1, 3)
@@ -3386,6 +3395,9 @@ class InvoiceApp(QMainWindow):
         self.receipt_amount.setRange(0, 999999999.99)
         self.receipt_amount.setDecimals(2)
         self.receipt_amount.setPrefix("₹ ")
+        self.receipt_amount.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
         self._auto_receipt_amount = Decimal("0.00")
         self._receipt_amount_manual_override = False
         self._updating_receipt_amount = False
@@ -3396,21 +3408,40 @@ class InvoiceApp(QMainWindow):
         self.receipt_method.addItems(
             ["Cash", "UPI", "Bank Transfer", "Cheque", "Other"]
         )
+        self.receipt_method.setCurrentText("UPI")
         self.receipt_date = NoWheelDateEdit(QDate.currentDate())
         self.receipt_date.setCalendarPopup(True)
         self.receipt_date.setDisplayFormat("dd/MM/yyyy")
         self.receipt_reference = QLineEdit()
         self.receipt_reference.setPlaceholderText("Optional transaction / receipt reference")
         receipt_form.addWidget(QLabel("Amount received"), 3, 0)
-        receipt_form.addWidget(
-            self.spinbox_with_arrows(self.receipt_amount), 3, 1
-        )
+        receipt_form.addWidget(self.receipt_amount, 3, 1)
         receipt_form.addWidget(QLabel("Payment method"), 3, 2)
         receipt_form.addWidget(self.receipt_method, 3, 3)
         receipt_form.addWidget(QLabel("Payment date"), 4, 0)
         receipt_form.addWidget(self.receipt_date, 4, 1)
         receipt_form.addWidget(QLabel("Reference"), 4, 2)
         receipt_form.addWidget(self.receipt_reference, 4, 3)
+        self.receipt_screenshot_path = ""
+        self.receipt_screenshot_button = QPushButton("Attach screenshot")
+        self.receipt_screenshot_button.clicked.connect(
+            self.choose_receipt_screenshot
+        )
+        self.receipt_screenshot_label = QLabel(
+            "Required for non-cash payments"
+        )
+        self.receipt_screenshot_label.setWordWrap(True)
+        self.receipt_screenshot_controls = QWidget()
+        screenshot_layout = QHBoxLayout(self.receipt_screenshot_controls)
+        screenshot_layout.setContentsMargins(0, 0, 0, 0)
+        screenshot_layout.addWidget(self.receipt_screenshot_button)
+        screenshot_layout.addWidget(self.receipt_screenshot_label, 1)
+        self.receipt_screenshot_title = QLabel("Payment proof")
+        receipt_form.addWidget(self.receipt_screenshot_title, 5, 0)
+        receipt_form.addWidget(self.receipt_screenshot_controls, 5, 1, 1, 3)
+        self.receipt_method.currentTextChanged.connect(
+            self.update_receipt_screenshot_controls
+        )
         receipt_form.setColumnStretch(1, 1)
         receipt_form.setColumnStretch(3, 1)
         invoice_payments_layout.addLayout(receipt_form)
@@ -3464,13 +3495,19 @@ class InvoiceApp(QMainWindow):
         payment_actions.addWidget(self.record_payment_button)
         payment_actions.addWidget(self.edit_payment_button)
         payment_actions.addWidget(self.delete_payment_button)
+        self.view_receipt_screenshot_button = QPushButton("View Screenshot")
+        self.view_receipt_screenshot_button.clicked.connect(
+            self.view_selected_invoice_payment_screenshot
+        )
+        self.view_receipt_screenshot_button.setEnabled(False)
+        payment_actions.addWidget(self.view_receipt_screenshot_button)
         payment_actions.addStretch()
         self.invoice_payment_summary = QLabel("Save the invoice before recording payments.")
         payment_actions.addWidget(self.invoice_payment_summary, 1)
         invoice_payments_layout.addLayout(payment_actions)
-        self.invoice_payments_table = QTableWidget(0, 4)
+        self.invoice_payments_table = QTableWidget(0, 5)
         self.invoice_payments_table.setHorizontalHeaderLabels(
-            ["Date", "Amount", "Method", "Reference"]
+            ["Date", "Amount", "Method", "Reference", "Proof"]
         )
         self.invoice_payments_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
@@ -3478,6 +3515,9 @@ class InvoiceApp(QMainWindow):
         self.invoice_payments_table.verticalHeader().setVisible(False)
         self.invoice_payments_table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch
+        )
+        self.invoice_payments_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents
         )
         self.invoice_payments_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
@@ -3493,6 +3533,7 @@ class InvoiceApp(QMainWindow):
         invoice_payments_layout.addWidget(self.invoice_payments_table)
         self.record_payment_button.setEnabled(False)
         self.invoice_payments_box.setVisible(False)
+        self.update_receipt_screenshot_controls()
 
         items_box = QGroupBox("Items")
         items_layout = QVBoxLayout(items_box)
@@ -4474,6 +4515,34 @@ class InvoiceApp(QMainWindow):
             )
 
 
+    def choose_receipt_screenshot(self):
+
+        screenshot_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select payment screenshot",
+            str(Path.home()),
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp)",
+        )
+        if not screenshot_path:
+            return
+        self.receipt_screenshot_path = screenshot_path
+        self.receipt_screenshot_label.setText(Path(screenshot_path).name)
+        self.receipt_screenshot_label.setToolTip(screenshot_path)
+
+
+    def update_receipt_screenshot_controls(self, *_args):
+
+        is_cash = self.receipt_method.currentText() == "Cash"
+        self.receipt_screenshot_title.setVisible(not is_cash)
+        self.receipt_screenshot_controls.setVisible(not is_cash)
+        if is_cash:
+            self.receipt_screenshot_path = ""
+            self.receipt_screenshot_label.setText(
+                "Required for non-cash payments"
+            )
+            self.receipt_screenshot_label.setToolTip("")
+
+
     def refresh_invoice_payments(self):
 
         if not hasattr(self, "invoice_payments_table"):
@@ -4507,7 +4576,7 @@ class InvoiceApp(QMainWindow):
             ).fetchone()
             payments = con.execute(
                 """
-                SELECT id, paid_on, amount, method, reference
+                SELECT id, paid_on, amount, method, reference, proof_path
                 FROM invoice_payments
                 WHERE document_kind = 'INVOICE' AND invoice_no = ?
                 ORDER BY paid_on, id
@@ -4528,20 +4597,36 @@ class InvoiceApp(QMainWindow):
             sum((Decimal(str(payment[2])) for payment in payments), Decimal("0"))
         )
         balance_due = max(Decimal("0.00"), money(grand_total - paid_total))
-        for row, (payment_id, paid_on, amount, method, reference) in enumerate(payments):
+        for row, (payment_id, paid_on, amount, method, reference, proof_path) in enumerate(payments):
             self.invoice_payments_table.insertRow(row)
             date_text = QDate.fromString(paid_on, "yyyy-MM-dd").toString("dd/MM/yyyy")
+            proof_exists = bool(proof_path and Path(proof_path).is_file())
+            proof_missing = method != "Cash" and not proof_exists
+            proof_status = (
+                "Not required" if method == "Cash"
+                else "Attached" if proof_exists
+                else "Missing"
+            )
             for column, value in enumerate((
                 date_text or paid_on,
                 f"₹{money(amount):,.2f}",
                 method,
                 reference,
+                proof_status,
             )):
-                self.invoice_payments_table.setItem(
-                    row, column, QTableWidgetItem(str(value))
-                )
+                cell = QTableWidgetItem(str(value))
+                if proof_missing:
+                    cell.setBackground(QBrush(QColor("#f7e9e7")))
+                    cell.setForeground(QBrush(QColor("#82443e")))
+                    cell.setToolTip(
+                        "Payment proof missing. Edit this receipt to attach a screenshot."
+                    )
+                self.invoice_payments_table.setItem(row, column, cell)
             self.invoice_payments_table.item(row, 0).setData(
                 Qt.ItemDataRole.UserRole, payment_id
+            )
+            self.invoice_payments_table.item(row, 4).setData(
+                Qt.ItemDataRole.UserRole, proof_path or ""
             )
 
         self.invoice_payment_summary.setText(
@@ -4638,6 +4723,9 @@ class InvoiceApp(QMainWindow):
             amount_field.setRange(0.01, float(invoice["balance"]))
             amount_field.setDecimals(2)
             amount_field.setPrefix("₹ ")
+            amount_field.setButtonSymbols(
+                QAbstractSpinBox.ButtonSymbols.NoButtons
+            )
             amount_field.setToolTip(
                 "Amount to collect from this invoice; defaults to 100% of its balance"
             )
@@ -4647,11 +4735,7 @@ class InvoiceApp(QMainWindow):
             )))
             amount_field.setEnabled(include_checkbox.isChecked())
             self._previous_invoice_amount_fields[invoice["number"]] = amount_field
-            table.setCellWidget(
-                row_index, 4,
-                self.spinbox_with_arrows(amount_field, button_height=20),
-            )
-            table.setRowHeight(row_index, 44)
+            table.setCellWidget(row_index, 4, amount_field)
             include_checkbox.toggled.connect(
                 lambda checked, field=amount_field:
                     self.set_previous_invoice_amount_enabled(field, checked)
@@ -4878,9 +4962,65 @@ class InvoiceApp(QMainWindow):
 
     def update_invoice_payment_actions(self):
 
-        has_selection = self.invoice_payments_table.currentRow() >= 0
+        row = self.invoice_payments_table.currentRow()
+        has_selection = row >= 0
         self.edit_payment_button.setEnabled(has_selection)
         self.delete_payment_button.setEnabled(has_selection)
+        proof_path = ""
+        if has_selection and self.invoice_payments_table.item(row, 4):
+            proof_path = self.invoice_payments_table.item(row, 4).data(
+                Qt.ItemDataRole.UserRole
+            ) or ""
+        self.view_receipt_screenshot_button.setEnabled(
+            bool(proof_path and Path(proof_path).is_file())
+        )
+
+
+    def view_selected_invoice_payment_screenshot(self):
+
+        row = self.invoice_payments_table.currentRow()
+        if row < 0:
+            return
+        proof_item = self.invoice_payments_table.item(row, 4)
+        proof_path = Path(
+            proof_item.data(Qt.ItemDataRole.UserRole) or ""
+        ) if proof_item else None
+        if not proof_path or not proof_path.is_file():
+            QMessageBox.warning(
+                self,
+                "Screenshot Missing",
+                "The screenshot for this receipt could not be found.",
+            )
+            return
+        image = QPixmap(str(proof_path))
+        if image.isNull():
+            QMessageBox.warning(
+                self,
+                "Screenshot Cannot Be Opened",
+                "This receipt screenshot is not a supported image.",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Receipt Screenshot · {proof_path.name}")
+        layout = QVBoxLayout(dialog)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image_label.setPixmap(image.scaled(
+            1000,
+            720,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+        scroll_area.setWidget(image_label)
+        layout.addWidget(scroll_area)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.resize(900, 680)
+        dialog.exec()
 
 
     def refresh_invoice_after_payment_change(self):
@@ -5298,7 +5438,7 @@ class InvoiceApp(QMainWindow):
         )
         with sqlite3.connect(DB_PATH) as con:
             payment = con.execute(
-                "SELECT paid_on, amount, method, reference "
+                "SELECT paid_on, amount, method, reference, proof_path "
                 "FROM invoice_payments WHERE id = ? AND invoice_no = ?",
                 (payment_id, int(self.invoice_no.text())),
             ).fetchone()
@@ -5313,6 +5453,7 @@ class InvoiceApp(QMainWindow):
         amount_field.setRange(0.01, 999999999.99)
         amount_field.setDecimals(2)
         amount_field.setPrefix("₹ ")
+        amount_field.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         amount_field.setValue(float(payment[1]))
         method_field = NoWheelComboBox()
         method_field.addItems(["Cash", "UPI", "Bank Transfer", "Cheque", "Other"])
@@ -5323,13 +5464,49 @@ class InvoiceApp(QMainWindow):
         date_field.setCalendarPopup(True)
         date_field.setDisplayFormat("dd/MM/yyyy")
         reference_field = QLineEdit(payment[3])
+        proof_state = {
+            "path": payment[4] or "",
+            "new_source": "",
+        }
+        proof_controls = QWidget()
+        proof_layout = QHBoxLayout(proof_controls)
+        proof_layout.setContentsMargins(0, 0, 0, 0)
+        proof_button = QPushButton("Upload / Replace")
+        proof_label = QLabel(
+            Path(proof_state["path"]).name
+            if proof_state["path"] and Path(proof_state["path"]).is_file()
+            else "No screenshot attached"
+        )
+        proof_label.setWordWrap(True)
+        proof_layout.addWidget(proof_button)
+        proof_layout.addWidget(proof_label, 1)
+
+        def choose_edit_receipt_proof():
+            screenshot_path, _ = QFileDialog.getOpenFileName(
+                dialog,
+                "Select payment screenshot",
+                str(Path.home()),
+                "Images (*.png *.jpg *.jpeg *.webp *.bmp)",
+            )
+            if screenshot_path:
+                proof_state["new_source"] = screenshot_path
+                proof_label.setText(Path(screenshot_path).name)
+                proof_label.setToolTip(screenshot_path)
+
+        def update_edit_proof_visibility(method):
+            proof_controls.setVisible(method != "Cash")
+
+        proof_button.clicked.connect(choose_edit_receipt_proof)
+        method_field.currentTextChanged.connect(update_edit_proof_visibility)
         form.addRow(
             "Amount",
-            self.spinbox_with_arrows(amount_field, button_height=20),
+            amount_field,
         )
         form.addRow("Method", method_field)
         form.addRow("Date", date_field)
         form.addRow("Reference", reference_field)
+        form.addRow("Payment proof", proof_controls)
+        update_edit_proof_visibility(method_field.currentText())
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -5338,6 +5515,20 @@ class InvoiceApp(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        method = method_field.currentText()
+        proof_path = "" if method == "Cash" else (
+            proof_state["new_source"] or proof_state["path"]
+        )
+        if method != "Cash" and (
+            not proof_path or not Path(proof_path).is_file()
+        ):
+            QMessageBox.warning(
+                self,
+                "Payment Screenshot Required",
+                "Attach a payment screenshot for non-cash receipts.",
+            )
             return
 
         new_amount = money(amount_field.value())
@@ -5373,22 +5564,53 @@ class InvoiceApp(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+
+        old_proof_path = payment[4] or ""
+        if proof_state["new_source"]:
+            proof_source = Path(proof_state["new_source"])
+            proof_folder = DATA_DIR / "payment_receipts"
+            proof_folder.mkdir(parents=True, exist_ok=True)
+            proof_destination = proof_folder / (
+                f"INV-{invoice_no:04d}_{datetime.now():%Y%m%d_%H%M%S_%f}"
+                f"{proof_source.suffix.lower()}"
+            )
+            try:
+                shutil.copy2(proof_source, proof_destination)
+            except OSError as error:
+                QMessageBox.warning(
+                    self,
+                    "Payment Screenshot Could Not Be Saved",
+                    str(error),
+                )
+                return
+            proof_path = str(proof_destination)
+
         with sqlite3.connect(DB_PATH) as con:
             con.execute(
                 """
                 UPDATE invoice_payments
-                SET paid_on = ?, amount = ?, method = ?, reference = ?
+                SET paid_on = ?, amount = ?, method = ?, reference = ?, proof_path = ?
                 WHERE id = ? AND invoice_no = ?
                 """,
                 (
                     date_field.date().toString("yyyy-MM-dd"),
                     float(new_amount),
-                    method_field.currentText(),
+                    method,
                     reference_field.text().strip(),
+                    proof_path,
                     payment_id,
                     invoice_no,
                 ),
             )
+            old_proof_references = (
+                con.execute(
+                    "SELECT COUNT(*) FROM invoice_payments WHERE proof_path = ?",
+                    (old_proof_path,),
+                ).fetchone()[0]
+                if old_proof_path and old_proof_path != proof_path else 1
+            )
+        if old_proof_path and old_proof_path != proof_path and not old_proof_references:
+            Path(old_proof_path).unlink(missing_ok=True)
         self.refresh_invoice_after_payment_change()
 
 
@@ -5399,6 +5621,11 @@ class InvoiceApp(QMainWindow):
             return
         item = self.invoice_payments_table.item(row, 0)
         payment_id = item.data(Qt.ItemDataRole.UserRole)
+        proof_item = self.invoice_payments_table.item(row, 4)
+        proof_path = (
+            proof_item.data(Qt.ItemDataRole.UserRole) or ""
+            if proof_item else ""
+        )
         answer = QMessageBox.question(
             self,
             "Delete Receipt",
@@ -5422,12 +5649,35 @@ class InvoiceApp(QMainWindow):
                 "DELETE FROM invoice_payments WHERE id = ? AND invoice_no = ?",
                 (payment_id, int(self.invoice_no.text())),
             )
+            remaining_proof_rows = (
+                con.execute(
+                    "SELECT COUNT(*) FROM invoice_payments WHERE proof_path = ?",
+                    (proof_path,),
+                ).fetchone()[0]
+                if proof_path else 1
+            )
+        if proof_path and not remaining_proof_rows:
+            Path(proof_path).unlink(missing_ok=True)
         self.refresh_invoice_after_payment_change()
 
 
     def record_invoice_payment(self):
 
         if document_kind_for_selection(self.document_kind.currentIndex()) != "INVOICE":
+            return
+
+        payment_method = self.receipt_method.currentText()
+        screenshot_source = Path(self.receipt_screenshot_path) if (
+            payment_method != "Cash" and self.receipt_screenshot_path
+        ) else None
+        if payment_method != "Cash" and (
+            not screenshot_source or not screenshot_source.is_file()
+        ):
+            QMessageBox.warning(
+                self,
+                "Payment Screenshot Required",
+                "Attach the payment screenshot before recording a non-cash receipt.",
+            )
             return
 
         if not self.save_invoice(show_dialog=True, show_success=False):
@@ -5557,20 +5807,41 @@ class InvoiceApp(QMainWindow):
                 f"{receipt_reference} · {allocation_reference}"
                 if receipt_reference else allocation_reference
             )
+        proof_path = ""
+        if screenshot_source:
+            proof_folder = DATA_DIR / "payment_receipts"
+            proof_folder.mkdir(parents=True, exist_ok=True)
+            proof_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            proof_destination = proof_folder / (
+                f"INV-{invoice_no:04d}_{proof_timestamp}"
+                f"{screenshot_source.suffix.lower()}"
+            )
+            try:
+                shutil.copy2(screenshot_source, proof_destination)
+            except OSError as error:
+                QMessageBox.warning(
+                    self,
+                    "Payment Screenshot Could Not Be Saved",
+                    str(error),
+                )
+                return
+            proof_path = str(proof_destination)
         with sqlite3.connect(DB_PATH) as con:
             con.executemany(
                 """
                 INSERT INTO invoice_payments (
-                    document_kind, invoice_no, paid_on, amount, method, reference
-                ) VALUES ('INVOICE', ?, ?, ?, ?, ?)
+                    document_kind, invoice_no, paid_on, amount, method, reference,
+                    proof_path
+                ) VALUES ('INVOICE', ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         target_invoice_no,
                         self.receipt_date.date().toString("yyyy-MM-dd"),
                         float(allocated),
-                        self.receipt_method.currentText(),
+                        payment_method,
                         receipt_reference,
+                        proof_path,
                     )
                     for target_invoice_no, allocated in allocations
                 ],
@@ -5618,13 +5889,19 @@ class InvoiceApp(QMainWindow):
         self.reset_receipt_amount_autofill()
         self.receipt_date.setDate(QDate.currentDate())
         self.receipt_reference.clear()
+        self.receipt_screenshot_path = ""
+        self.receipt_screenshot_label.setText(
+            "Required for non-cash payments"
+        )
+        self.receipt_screenshot_label.setToolTip("")
+        self.receipt_method.setCurrentText("UPI")
         self.refresh_invoice_payments()
         self.refresh_invoice_request_history()
         self.remove_moved_private_files()
         QMessageBox.information(
             self,
             "Payment Recorded",
-            f"₹{amount:,.2f} received by {self.receipt_method.currentText()} "
+            f"₹{amount:,.2f} received by {payment_method} "
             f"and allocated across {len(allocations)} invoice(s).",
         )
         if failed_previous_requests:
@@ -6008,28 +6285,20 @@ class InvoiceApp(QMainWindow):
             message_lines = [
                 f"Hello {greeting},",
                 "",
-                f"Payment details for invoice #{invoice_no}:",
-                "",
-                "CURRENT INVOICE",
-                f"Invoice total: INR {invoice_total:.2f}",
-                f"Payment request ({request_percent:g}%): INR {request_amount:.2f}",
+                f"Invoice #{invoice_no}",
+                f"Total: INR {invoice_total:.2f}",
                 f"Received: INR {paid_total:.2f}",
+                f"Due: INR {balance_due:.2f}",
+                f"Payment request ({request_percent:g}%): INR {request_amount:.2f}",
             ]
-            if balance_due > 0:
-                message_lines.append(f"Balance due: INR {balance_due:.2f}")
-            else:
-                message_lines.append("Payment complete")
             if previous_open_invoices:
                 previous_balance = sum(
                     (invoice[4] for invoice in previous_open_invoices),
                     Decimal("0.00"),
                 )
-                message_lines.extend((
-                    "",
-                    "Previous unpaid invoices",
-                ))
-                for old_number, is_private, old_date, old_customer, old_balance in previous_open_invoices:
-                    label = f"Invoice #{old_number}"
+                message_lines.extend(("", "Previous unpaid invoices:"))
+                for old_number, is_private, old_date, _, old_balance in previous_open_invoices:
+                    label = f"#{old_number}"
                     if is_private:
                         label += " (Private)"
                     formatted_date = (
@@ -6037,18 +6306,22 @@ class InvoiceApp(QMainWindow):
                         if old_date else "Date unavailable"
                     )
                     message_lines.append(
-                        f"- {label} · {formatted_date} · {old_customer}: "
-                        f"INR {old_balance:.2f} due"
+                        f"{label} · Date: {formatted_date}\n"
+                        f"Due: INR {old_balance:.2f}\n"
+                        "QR allocation: "
                         + (
-                            f" · INR {selected_previous_amounts[old_number]:.2f} "
-                            "included in combined scanner"
+                            f"INR {selected_previous_amounts[old_number]:.2f}"
                             if old_number in selected_previous_numbers
-                            else ""
+                            else "Not included"
                         )
                     )
+                invoice_numbers_text = " + ".join(
+                    [f"#{invoice_no}"]
+                    + [f"#{invoice[0]}" for invoice in previous_open_invoices]
+                )
                 message_lines.extend((
-                    f"Previous invoices due: INR {previous_balance:.2f}",
-                    "Total outstanding across current and previous invoices: "
+                    f"Previous invoices total due: INR {previous_balance:.2f}",
+                    f"Total outstanding ({invoice_numbers_text}): "
                     f"INR {balance_due + previous_balance:.2f}",
                 ))
             if selected_previous_invoices:
@@ -6058,22 +6331,18 @@ class InvoiceApp(QMainWindow):
                 )
                 message_lines.extend((
                     "",
-                    "COMBINED PAYMENT",
+                    "Combined QR breakdown:",
                     f"Current invoice #{invoice_no}: INR {request_amount:.2f}",
-                    f"Previous invoice(s): {selected_labels}",
-                    f"Combined scanner total: INR {combined_request_amount:.2f}",
-                    "Please scan the separate combined QR image attached. "
-                    "Do not scan the QR printed inside the invoice PDF; that "
-                    f"QR is only for invoice #{invoice_no}.",
+                    f"Previous: {selected_labels}",
+                    f"Combined QR total: INR {combined_request_amount:.2f}",
+                    "Scan the separate combined QR attached, not the invoice PDF QR.",
                 ))
-            elif is_invoice:
+            else:
                 message_lines.extend((
                     "",
-                    "PAYMENT",
-                    f"Current invoice request: INR {request_amount:.2f}",
-                    "The payment QR/request is for the current invoice only. "
-                    "Previous invoice balances are listed above but are not "
-                    "included in this scanner.",
+                    f"Combined QR total: INR {request_amount:.2f}",
+                    "Payment QR covers the current invoice request only; "
+                    "previous balances are not included.",
                 ))
             message_lines.extend(("", "Regards,", self.seller_name.text()))
             message = "\n".join(message_lines)
@@ -6254,6 +6523,7 @@ class InvoiceApp(QMainWindow):
         self.invoice_type.setCurrentIndex(0)
         self.gst_rate.setValue(5)
         self.payment_percent.setValue(50)
+        self.receipt_method.setCurrentText("UPI")
 
 
         self.refresh()
