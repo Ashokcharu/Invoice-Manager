@@ -3345,6 +3345,9 @@ class InvoiceApp(QMainWindow):
         self.payment_percent.setDecimals(2)
         self.payment_percent.setValue(50)
         self.payment_percent.setSuffix(" % of invoice")
+        self.payment_percent.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
         self.payment_percent.setToolTip(
             "Percentage of the full invoice total. The request cannot exceed the balance due."
         )
@@ -3358,9 +3361,7 @@ class InvoiceApp(QMainWindow):
         invoice_payments_layout = QVBoxLayout(self.invoice_payments_box)
         receipt_form = QGridLayout()
         receipt_form.addWidget(QLabel("Request %"), 0, 0)
-        receipt_form.addWidget(
-            self.spinbox_with_arrows(self.payment_percent, step_size=5), 0, 1
-        )
+        receipt_form.addWidget(self.payment_percent, 0, 1)
         receipt_form.addWidget(QLabel("Request amount"), 0, 2)
         self.payment_request_amount = AmountEntryDoubleSpinBox()
         self.payment_request_amount.setRange(0, 999999999.99)
@@ -3428,7 +3429,7 @@ class InvoiceApp(QMainWindow):
             self.choose_receipt_screenshot
         )
         self.receipt_screenshot_label = QLabel(
-            "Required for non-cash payments"
+            "Optional for non-cash payments"
         )
         self.receipt_screenshot_label.setWordWrap(True)
         self.receipt_screenshot_controls = QWidget()
@@ -4555,7 +4556,7 @@ class InvoiceApp(QMainWindow):
         if is_cash:
             self.receipt_screenshot_path = ""
             self.receipt_screenshot_label.setText(
-                "Required for non-cash payments"
+                "Optional for non-cash payments"
             )
             self.receipt_screenshot_label.setToolTip("")
 
@@ -5492,7 +5493,7 @@ class InvoiceApp(QMainWindow):
         proof_label = QLabel(
             Path(proof_state["path"]).name
             if proof_state["path"] and Path(proof_state["path"]).is_file()
-            else "No screenshot attached"
+            else "No screenshot attached (optional)"
         )
         proof_label.setWordWrap(True)
         proof_layout.addWidget(proof_button)
@@ -5538,15 +5539,8 @@ class InvoiceApp(QMainWindow):
         proof_path = "" if method == "Cash" else (
             proof_state["new_source"] or proof_state["path"]
         )
-        if method != "Cash" and (
-            not proof_path or not Path(proof_path).is_file()
-        ):
-            QMessageBox.warning(
-                self,
-                "Payment Screenshot Required",
-                "Attach a payment screenshot for non-cash receipts.",
-            )
-            return
+        if proof_path and not Path(proof_path).is_file():
+            proof_path = ""
 
         new_amount = money(amount_field.value())
         invoice_no = int(self.invoice_no.text())
@@ -5597,10 +5591,15 @@ class InvoiceApp(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Payment Screenshot Could Not Be Saved",
-                    str(error),
+                    f"The receipt will be updated without the new screenshot.\n{error}",
                 )
-                return
-            proof_path = str(proof_destination)
+                proof_path = (
+                    old_proof_path
+                    if old_proof_path and Path(old_proof_path).is_file()
+                    else ""
+                )
+            else:
+                proof_path = str(proof_destination)
 
         with sqlite3.connect(DB_PATH) as con:
             con.execute(
@@ -5687,15 +5686,8 @@ class InvoiceApp(QMainWindow):
         screenshot_source = Path(self.receipt_screenshot_path) if (
             payment_method != "Cash" and self.receipt_screenshot_path
         ) else None
-        if payment_method != "Cash" and (
-            not screenshot_source or not screenshot_source.is_file()
-        ):
-            QMessageBox.warning(
-                self,
-                "Payment Screenshot Required",
-                "Attach the payment screenshot before recording a non-cash receipt.",
-            )
-            return
+        if screenshot_source and not screenshot_source.is_file():
+            screenshot_source = None
 
         if not self.save_invoice(show_dialog=True, show_success=False):
             return
@@ -5839,10 +5831,10 @@ class InvoiceApp(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Payment Screenshot Could Not Be Saved",
-                    str(error),
+                    f"The payment will be recorded without a screenshot.\n{error}",
                 )
-                return
-            proof_path = str(proof_destination)
+            else:
+                proof_path = str(proof_destination)
         with sqlite3.connect(DB_PATH) as con:
             con.executemany(
                 """
@@ -5908,7 +5900,7 @@ class InvoiceApp(QMainWindow):
         self.receipt_reference.clear()
         self.receipt_screenshot_path = ""
         self.receipt_screenshot_label.setText(
-            "Required for non-cash payments"
+            "Optional for non-cash payments"
         )
         self.receipt_screenshot_label.setToolTip("")
         self.receipt_method.setCurrentText("UPI")
