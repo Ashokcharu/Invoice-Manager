@@ -1,6 +1,6 @@
 # Invoice Manager
 
-ADOODS Invoice Manager is a desktop application for creating GST invoices and quotations. It exports Excel workbooks and PDFs, generates UPI payment QR codes for invoices, and tracks invoice receipts and outstanding balances.
+Invoice Manager is a desktop application for creating GST invoices and quotations. It exports Excel workbooks and PDFs, generates UPI payment QR codes for invoices, and tracks invoice receipts and outstanding balances.
 
 ## Features
 
