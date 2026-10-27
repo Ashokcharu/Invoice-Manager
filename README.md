@@ -74,3 +74,13 @@ python -m PyInstaller `
 The application bundle is created in `dist/AdoodsInvoice/`.
 
 On Linux, PyInstaller uses `:` instead of `;` to separate the source and destination in each `--add-data` argument.
+
+## License & Copyright
+
+Copyright © 2026 Ashok. All rights reserved.
+
+This project is proprietary software. Public visibility of this repository does not grant permission to copy, modify, redistribute, or commercially use its source code without prior written permission from the copyright holder.
+
+For commercial licensing or other permissions, please contact the repository owner.
+
+Third-party dependencies remain subject to their respective licenses.
