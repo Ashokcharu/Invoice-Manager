@@ -1,6 +1,6 @@
-# ADOODS Invoice Manager
+# Invoice Manager
 
-ADOODS Invoice Manager is a desktop application for creating GST invoices and quotations. It exports Excel workbooks and PDFs, generates UPI payment QR codes for invoices, and tracks invoice receipts and outstanding balances.
+Invoice Manager is a desktop application for creating GST invoices and quotations. It exports Excel workbooks and PDFs, generates UPI payment QR codes for invoices, and tracks invoice receipts and outstanding balances.
 
 ## Features
 
@@ -50,7 +50,6 @@ Install LibreOffice through your Linux distribution's package manager before exp
 - Regular (non-frozen) runs keep their existing year-only invoice output folders.
 - Generated invoice folders are excluded by `.gitignore`.
 
-**Before publishing this repository on GitHub, review `data/invoices.db` and `data/invoice_signature.png`.** They may contain customer, payment, seller, or signature information. Remove sensitive files from version control and Git history before making the repository public; adding them to `.gitignore` alone does not remove files already tracked by Git.
 
 ## Build a Windows Application
 
